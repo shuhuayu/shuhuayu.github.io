@@ -11,9 +11,9 @@ nav_order: 2
 
 [Distributed Sign Momentum with Local Steps for Training Transformers](https://arxiv.org/abs/2411.17866).  Shuhua Yu, Ding Zhou, Cong Xie, An Xu, Zhi Zhang, Xin Liu, Soummya Kar. *arXiv preprint arXiv:2411.17866*, 2024.  
 
-[Large Deviations and Improved Mean-squared Error Rates of Nonlinear SGD: Heavy-tailed Noise and Power of Symmetry](https://arxiv.org/abs/2410.15637). Aleksandar Armacki\*, Shuhua Yu\*, Dragana Bajovic, Dusan Jakovetic, Soummya Kar.  *arXiv preprint arXiv:2410.15637, under review for SIAM Journal on Optimization*. 2024.
+[Large Deviations and Improved Mean-squared Error Rates of Nonlinear SGD: Heavy-tailed Noise and Power of Symmetry](https://arxiv.org/abs/2410.15637). Aleksandar Armacki\*, Shuhua Yu\*, Dragana Bajovic, Dusan Jakovetic, Soummya Kar.  *arXiv preprint arXiv:2410.15637, under revision for SIAM Journal on Optimization*. 2024.
 
-[Smoothed Gradient Clipping and Error Feedback for Distributed Optimization under Heavy-Tailed Noise](https://arxiv.org/abs/2310.16920). Shuhua Yu, Dusan Jakovetic, Soummya Kar. *arXiv preprint arXiv:2310.16920, Under review for SIAM Journal on Optimization*, 2024. \[[INFORMS 24' slides](/assets/pdf/smoothed_gradient_clipping_and_error_feedback_for_decentralized_optimization_under_symmetric_heavy_tailed_noise_slides.pdf)\]
+[Smoothed Gradient Clipping and Error Feedback for Distributed Optimization under Heavy-Tailed Noise](https://arxiv.org/abs/2310.16920). Shuhua Yu, Dusan Jakovetic, Soummya Kar. *arXiv preprint arXiv:2310.16920, Under review for SIAM Journal on Optimization*, 2023. \[[INFORMS 24' slides](/assets/pdf/smoothed_gradient_clipping_and_error_feedback_for_decentralized_optimization_under_symmetric_heavy_tailed_noise_slides.pdf)\]
 
 [Revisiting Image Classifier Training for Improved Certified Robust Defense against Adversarial Patches](https://openreview.net/forum?id=2tdhQMLg36). Aniruddha Saha\*, Shuhua Yu\*, Arash Norouzzadeh, Wan-Yi Lin, Chaithanya Kumar Mummadi. *Transactions on Machine Learning Research*, 2023. 
 
