@@ -7,6 +7,8 @@ nav: true
 nav_order: 2
 --- 
 
+[Decentralized Nonconvex Optimization under Heavy-Tailed Noise: Normalization and Optimal Convergence](https://arxiv.org/abs/2505.03736). Shuhua Yu, Dusan Jakovetic, Soummya Kar. *arXiv preprint arXiv:2505.03736*. 2025.
+
 [High-probability Convergence Bounds for Online Nonlinear Stochastic Gradient Descent Under Heavy-tailed Noise](https://openreview.net/forum?id=hsM969HT5W). Aleksandar Armacki, Shuhua Yu, Pranay Sharma, Gauri Joshi, Dragana Bajovic, Dusan Jakovetic, Soummya Kar. *International Conference on Artificial Intelligence and Statistics (AISTATS)*, 2025.
 
 [Distributed Sign Momentum with Local Steps for Training Transformers](https://arxiv.org/abs/2411.17866).  Shuhua Yu, Ding Zhou, Cong Xie, An Xu, Zhi Zhang, Xin Liu, Soummya Kar. *arXiv preprint arXiv:2411.17866*, 2024.  
