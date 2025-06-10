@@ -11,7 +11,7 @@ nav_order: 2
 
 [High-probability Convergence Bounds for Online Nonlinear Stochastic Gradient Descent Under Heavy-tailed Noise](https://openreview.net/forum?id=hsM969HT5W). Aleksandar Armacki, Shuhua Yu, Pranay Sharma, Gauri Joshi, Dragana Bajovic, Dusan Jakovetic, Soummya Kar. *International Conference on Artificial Intelligence and Statistics (AISTATS)*, 2025.
 
-[Distributed Sign Momentum with Local Steps for Training Transformers](https://arxiv.org/abs/2411.17866).  Shuhua Yu, Ding Zhou, Cong Xie, An Xu, Zhi Zhang, Xin Liu, Soummya Kar. *arXiv preprint arXiv:2411.17866*, 2024.  
+[Distributed Sign Momentum with Local Steps for Training Transformers](https://arxiv.org/abs/2411.17866).  Shuhua Yu, Ding Zhou, Cong Xie, An Xu, Zhi Zhang, Xin Liu, Soummya Kar. *arXiv preprint arXiv:2411.17866*, 2024. \[[code](https://github.com/shuhuayu/dist-sign-momentum)\]
 
 [Large Deviations and Improved Mean-squared Error Rates of Nonlinear SGD: Heavy-tailed Noise and Power of Symmetry](https://arxiv.org/abs/2410.15637). Aleksandar Armacki\*, Shuhua Yu\*, Dragana Bajovic, Dusan Jakovetic, Soummya Kar.  *arXiv preprint arXiv:2410.15637, under revision for SIAM Journal on Optimization*. 2024.
 
