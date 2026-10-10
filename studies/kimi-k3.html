@@ -10,6 +10,7 @@
     <title>An infra-oriented diagram of Kimi K3</title>
     <meta name="robots" content="noindex, follow" />
     <link rel="stylesheet" href="./kimi-k3-diagram.css" />
+    <link rel="stylesheet" href="./kimi-k3-series.css" />
     <script src="./kimi-k3-diagram.js" defer></script>
     <style>
       :root {
@@ -865,13 +866,15 @@
   </head>
   <body>
     <div class="page">
-      <div class="topline">
-        <span>Kimi K3 / architecture study</span>
-        <div class="actions">
+      <nav class="series" aria-label="Kimi K3 series">
+        <span class="series-title">Kimi K3 studies</span>
+        <a href="./kimi-k3.html" aria-current="page">01 / Architecture</a>
+        <a href="./kimi-k3-memory.html">02 / Memory</a>
+        <div class="series-actions">
           <button class="small-button" id="theme-toggle" type="button">Dark</button>
           <button class="small-button" type="button" onclick="window.print()">Print</button>
         </div>
-      </div>
+      </nav>
 
       <header class="hero">
         <div class="eyebrow">Sequence &middot; depth &middot; width</div>
@@ -1478,6 +1481,9 @@
             The report also describes one MTP layer later fine-tuned into an EAGLE-3-style draft model. The released backbone configuration sets
             <code>num_nextn_predict_layers=0</code>, so that draft is not included in the 2.78T tally above.
           </p>
+          <nav class="series-footer" aria-label="Next Kimi K3 study">
+            <a href="./kimi-k3-memory.html">Next: Study 02 &mdash; Memory on 512 GB200s &#8594;</a>
+          </nav>
         </section>
       </main>
     </div>

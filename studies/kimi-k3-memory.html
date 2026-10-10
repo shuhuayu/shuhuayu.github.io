@@ -1,0 +1,494 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="robots" content="noindex, follow" />
+    <meta
+      name="description"
+      content="An interactive memory study of full Kimi K3 on 512 GB200 GPUs: FP32 master weights and Muon momentum, BF16 compute, FSDP, expert parallelism, pipeline microbatches, and activation checkpointing."
+    />
+    <title>Memory: Kimi K3 on 512 GB200s</title>
+    <link rel="stylesheet" href="./kimi-k3-memory.css" />
+    <link rel="stylesheet" href="./kimi-k3-series.css" />
+    <script src="./kimi-k3-memory.js" defer></script>
+  </head>
+  <body>
+    <main class="page">
+      <nav class="series" aria-label="Kimi K3 series">
+        <span class="series-title">Kimi K3 studies</span>
+        <a href="./kimi-k3.html">01 / Architecture</a>
+        <a href="./kimi-k3-memory.html" aria-current="page">02 / Memory</a>
+        <div class="series-actions">
+          <button id="theme-toggle" type="button">Dark</button>
+        </div>
+      </nav>
+      <header>
+        <div class="eyebrow">Kimi K3 studies / 02</div>
+        <h1>Memory: Kimi K3<br />on 512 GB200s</h1>
+        <p class="dek">
+          FP32 where training keeps its history. BF16 where the model computes. The hard part is understanding what is live at the same time.
+        </p>
+        <div class="headline-stats">
+          <div><strong>2.780T</strong><span>logical parameters</span></div>
+          <div><strong>512</strong><span>GB200 GPUs</span></div>
+          <div><strong>184.31 GiB</strong><span>reported HBM per GPU</span></div>
+          <div><strong>60.70 GiB</strong><span>average FP32 update-state tally</span></div>
+        </div>
+        <p class="scope">
+          Default case: full Kimi K3, PP8 / CP1 / TP1 / DP-shard64 / EP64, DistMuon plus AdamW, one 4K row per microbatch, and 64 microbatches in one
+          1F1B schedule. This is a training memory study, not an inference KV-cache calculator.
+        </p>
+        <nav class="jump-links" aria-label="Sections">
+          <a href="#precision">Precision policy</a><a href="#state">The state bill</a><a href="#lab">Memory lab</a
+          ><a href="#pipeline">Pipeline lifetimes</a><a href="#fitdeck">Fitting it</a><a href="#reality">Reality check</a>
+        </nav>
+      </header>
+
+      <section id="precision">
+        <div class="eyebrow">First, name the copies</div>
+        <h2>FP32 training does not mean FP32 GEMMs</h2>
+        <p>
+          In this recipe, the sharded resident parameter <em>is</em> the master weight. FSDP makes a BF16 compute view for forward and backward; the
+          optimizer updates the FP32 resident shard. Do not count a separate, full-model BF16 master copy on every GPU.
+        </p>
+        <div class="precision-flow" aria-label="Training precision flow">
+          <div><b>Resident master</b><strong>FP32</strong><small>Sharded parameter, updated by the optimizer</small></div>
+          <span aria-hidden="true">&#8594;</span>
+          <div><b>FSDP compute view</b><strong>BF16</strong><small>Cast / gather the weights needed by compute</small></div>
+          <span aria-hidden="true">&#8594;</span>
+          <div><b>Gradient history</b><strong>FP32</strong><small>Reduction and optimizer-visible gradient shards</small></div>
+          <span aria-hidden="true">&#8594;</span>
+          <div><b>Muon momentum</b><strong>FP32</strong><small>One persistent tensor, in the gradient's dtype</small></div>
+        </div>
+        <aside class="callout">
+          <strong>One more precision boundary:</strong> DistMuon's Newton&ndash;Schulz matrix iteration uses a BF16 working copy in this
+          implementation. FP32 momentum and master weights do not imply FP32 arithmetic for every optimizer temporary. Router statistics,
+          normalization arithmetic, and parts of KDA also use FP32 despite BF16 model GEMMs.
+        </aside>
+        <div class="table-scroll">
+          <table>
+            <thead>
+              <tr>
+                <th>Object</th>
+                <th>Dtype</th>
+                <th>Lifetime / ownership</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Resident / master parameter</td>
+                <td>FP32</td>
+                <td>Storage shard; persists across updates</td>
+              </tr>
+              <tr>
+                <td>Forward/backward parameter view</td>
+                <td>BF16</td>
+                <td>Unsharded over FSDP, but still local to PP and EP</td>
+              </tr>
+              <tr>
+                <td>Gradient reduction / accumulation policy</td>
+                <td>FP32</td>
+                <td>Unreduced PP gradients can outlive one microbatch</td>
+              </tr>
+              <tr>
+                <td>Optimizer-visible <code>param.grad</code></td>
+                <td>FP32</td>
+                <td>Matches the FP32 resident parameter in this recipe</td>
+              </tr>
+              <tr>
+                <td>Muon momentum</td>
+                <td>FP32</td>
+                <td>One tensor with the storage gradient's layout</td>
+              </tr>
+              <tr>
+                <td>AdamW first and second moments</td>
+                <td>FP32</td>
+                <td>Two tensors for the small AdamW remainder</td>
+              </tr>
+              <tr>
+                <td>Model GEMMs / main activations</td>
+                <td>BF16</td>
+                <td>Exceptions for selected pointwise arithmetic and statistics</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="state">
+        <div class="eyebrow">The unavoidable bill</div>
+        <h2>Muon needs one momentum, not two Adam moments</h2>
+        <p>
+          The <a href="./kimi-k3.html#parameters">first study</a> counted 2,779,931,738,208 parameters. In this optimizer assignment,
+          2,777,072,664,576 use DistMuon and 2,859,073,632 use AdamW: about 99.897% versus 0.103%. Routed expert matrices alone are 97.94% of the
+          model. Selecting 16 of 896 experts reduces compute per token, <em>not</em> the number of trainable weights or optimizer states we must
+          store.
+        </p>
+        <div class="equation-pair">
+          <div class="card">
+            <span class="eyebrow">DistMuon parameter</span><strong>4 + 4 + 4 = 12 bytes</strong>
+            <p>FP32 master + FP32 gradient + FP32 momentum</p>
+          </div>
+          <div class="card">
+            <span class="eyebrow">AdamW parameter</span><strong>4 + 4 + 4 + 4 = 16 bytes</strong>
+            <p>FP32 master + gradient + two FP32 moments</p>
+          </div>
+        </div>
+        <pre class="formula">
+Update-state tally = 12 P_muon + 16 P_adam
+                   = 33,370,617,153,024 bytes
+                   = 30.35 TiB across the logical model
+
+Ideal 512-way average = 60.70 GiB / GPU</pre
+        >
+        <p class="note">
+          This tally assumes all trainable parameters have gradients and optimizer state. It is not a measured peak or an assertion that every
+          gradient exists throughout forward. It excludes BF16 compute views, unsharded accumulation, activations, padding, communication, and
+          optimizer workspaces. The familiar &ldquo;16 or 17 bytes per parameter&rdquo; shortcut is not a universal memory law.
+        </p>
+        <div class="card contrast">
+          <div><strong>256 GPUs</strong><span>121.40 GiB average update-state tally</span></div>
+          <div><strong>512 GPUs</strong><span>60.70 GiB average update-state tally</span></div>
+          <p>
+            Twice the GPUs halves evenly distributed resident state. It does not automatically halve a gathered compute unit, microbatch activations,
+            or NCCL workspace.
+          </p>
+        </div>
+      </section>
+
+      <section id="lab">
+        <div class="eyebrow">Explore the ownership</div>
+        <h2>A memory lab, with its assumptions exposed</h2>
+        <p>
+          Pick a pipeline rank. The state ledger uses the actual 93-layer structure, including the first dense FFN, last MLA layer, embeddings, vision
+          pathway, and output head. The backward budget adds explicitly modeled working sets. It is a planning model, not a substitute for measuring
+          an implementation.
+        </p>
+        <form id="memory-controls" class="card controls" onsubmit="return false">
+          <label
+            >Pipeline ranks<select id="mem-pp">
+              <option>1</option>
+              <option>2</option>
+              <option>4</option>
+              <option selected>8</option>
+              <option>16</option>
+            </select></label
+          >
+          <label
+            >Expert parallel degree<select id="mem-ep">
+              <option>1</option>
+              <option>8</option>
+              <option>16</option>
+              <option>32</option>
+              <option selected>64</option>
+            </select></label
+          >
+          <label
+            >Dense + expert FSDP<select id="mem-fsdp">
+              <option value="on" selected>Shard resident state</option>
+              <option value="off">Replicate within DP replicas</option>
+            </select></label
+          >
+          <label>Pipeline rank<select id="mem-stage"></select></label>
+          <label
+            >Context per row<select id="mem-seq">
+              <option>2048</option>
+              <option selected>4096</option>
+              <option>8192</option>
+              <option>16384</option>
+            </select></label
+          >
+          <label
+            >Rows per microbatch<select id="mem-rows">
+              <option selected>1</option>
+              <option>2</option>
+            </select></label
+          >
+          <label
+            >Microbatches / schedule<select id="mem-mbs">
+              <option>8</option>
+              <option>16</option>
+              <option>32</option>
+              <option selected>64</option>
+            </select></label
+          >
+          <label
+            >Saved activations<select id="mem-ac">
+              <option value="full" selected>Full layer checkpoint</option>
+              <option value="none">Selected no-checkpoint candidates</option>
+            </select></label
+          >
+          <label
+            >BF16 compute residency<select id="mem-unit">
+              <option value="stage" selected>Whole local stage</option>
+              <option value="layer">One layer (optimistic alternative)</option>
+            </select></label
+          >
+          <label
+            >Gradient lifecycle<select id="mem-grad">
+              <option value="deferred" selected>PP: defer stage reduction</option>
+              <option value="sharded">Already reduced shards (optimistic)</option>
+            </select></label
+          >
+          <label
+            >Unmodeled workspace budget<select id="mem-reserve">
+              <option value="0">0 GiB (floor only)</option>
+              <option value="12">12 GiB</option>
+              <option value="24" selected>24 GiB</option>
+              <option value="36">36 GiB</option>
+            </select></label
+          >
+        </form>
+        <p id="config-warning" class="warning" role="status" hidden></p>
+        <p class="note" id="ownership-note"></p>
+        <div id="stage-map" class="stage-map" aria-label="Select a pipeline rank"></div>
+        <div class="result-grid">
+          <article class="card">
+            <span class="eyebrow">After reduction / optimizer-state tally</span><strong class="big-number" id="state-total">63.23 GiB</strong>
+            <p id="state-detail"></p>
+          </article>
+          <article class="card">
+            <span class="eyebrow">Planning subtotal + chosen reserve</span><strong class="big-number" id="budget-total"></strong>
+            <p id="budget-verdict"></p>
+          </article>
+        </div>
+        <div class="budget-chart card">
+          <div class="chart-title"><strong>Backward planning budget</strong><span id="budget-axis"></span></div>
+          <div id="budget-bar" class="budget-bar" aria-label="Memory budget segments"></div>
+          <div id="budget-legend" class="legend"></div>
+          <p class="note">
+            Full deferred gradients replace reduced shards in this phase; they are not added on top of an entire second gradient copy. Actual
+            reduction can briefly overlap both and needs additional buffers.
+          </p>
+        </div>
+        <div class="table-scroll card">
+          <table id="memory-ledger">
+            <thead>
+              <tr>
+                <th>Allocation category</th>
+                <th>Modeled size</th>
+                <th>What the number means</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <aside class="callout">
+          <strong>Not a fit guarantee:</strong> the state counts are structural, with ideal division and no shard padding. Full-checkpoint activation
+          bytes count only layer-boundary inputs. The other activation mode counts named tensor candidates, not an exhaustive autograd liveness audit.
+          KDA chunk buffers, AttnRes residual keepalives, casts, FSDP communication, HybridEP, NCCL, allocator slack, graph pools, and Muon
+          redistribution/iteration workspaces are not separately resolved. The reserve is a user-chosen allowance, not a measured decomposition.
+        </aside>
+        <noscript><p>Enable JavaScript for the calculator. The fixed state formulas and measured reference remain readable below.</p></noscript>
+      </section>
+
+      <section id="parallelism">
+        <h2>PP, EP, and FSDP divide different things</h2>
+        <div class="parallel-grid">
+          <article class="card">
+            <span class="eyebrow">PP8</span>
+            <h3>Own a model slice</h3>
+            <p>
+              Ranks 0&ndash;6 own 12 layers each; rank 7 owns the remaining nine. Embeddings and vision sit at the front, the output head at the back.
+              Pipeline stages are not perfectly balanced, so a model-wide average hides the worst rank.
+            </p>
+          </article>
+          <article class="card">
+            <span class="eyebrow">EP64</span>
+            <h3>Own 14 experts per MoE layer</h3>
+            <p>
+              896 / 64 = 14. The 64 ranks exchange tokens, rather than all 512 ranks participating in one EP group. Dense attention and shared-expert
+              weights are not divided by EP.
+            </p>
+          </article>
+          <article class="card">
+            <span class="eyebrow">FSDP64 / expert FSDP1</span>
+            <h3>Shard the resident history</h3>
+            <p>
+              512 / PP8 = 64 ranks per pipeline stage. Dense master/gradient/state shards span those 64 ranks. EP already divides the expert bank by
+              64, leaving expert FSDP = 64 / 64 = 1: no further expert-storage division.
+            </p>
+          </article>
+        </div>
+        <pre class="formula">
+On one pipeline stage, let D = non-routed parameters and E = routed parameters.
+
+Resident parameters / GPU = D / dense_FSDP + E / (EP * expert_FSDP)
+BF16 gathered stage view  = 2 * (D + E / EP) bytes
+
+At PP8 / EP64 / FSDP64: expert_FSDP = 1</pre
+        >
+        <p>
+          Increasing EP at fixed PP and GPU count can shrink the expert <em>compute</em> slice while reducing the expert FSDP degree. It does not
+          create additional aggregate HBM. And the 512 GPUs do not form one pooled allocation space: every rank must stay within its own device
+          capacity.
+        </p>
+      </section>
+
+      <section id="pipeline">
+        <div class="eyebrow">Memory follows lifetime, not global batch</div>
+        <h2>64 microbatches do not mean 64 saved forwards</h2>
+        <p>
+          In ordinary 1F1B, a rank fills its local pipeline, then alternates forward and backward. Backward releases that microbatch's saved
+          activations. With eight physical stages and enough microbatches, rank 0 can hold eight unfinished forwards; rank 7 needs only one. This is a
+          logical schedule bound, excluding implementation-specific send/receive buffers and keepalives.
+        </p>
+        <div class="card pipeline-card">
+          <div class="chart-title"><strong>Peak unfinished forwards by PP rank</strong><span id="pipeline-caption"></span></div>
+          <div id="pipeline-lifetimes" class="pipeline-lifetimes"></div>
+        </div>
+        <p class="formula compact">Peak unfinished forwards on rank r = min(microbatches, PP - r)</p>
+        <p>
+          At the default shape, local packed tokens <code>T = rows × context = 4096</code>. One BF16 <code>[T, 7168]</code> stream is 56 MiB. Twelve
+          checkpointed layer inputs across five unfinished forwards on rank 3 give a <em>boundary-input floor</em> of 3.28 GiB. The growing AttnRes
+          bank and kernel workspaces are additional, not hidden inside that number.
+        </p>
+        <p>
+          Global tokens per update are <code>DP × microbatches × rows × context</code>: <code>64 × 64 × 1 × 4096 = 16,777,216</code>. Increasing
+          microbatches beyond the 1F1B live-forward bound mostly extends the schedule; increasing rows or context increases each microbatch's
+          activation and routing footprint. Two 2K rows and one 4K row have the same flattened token count, but different document attention
+          boundaries.
+        </p>
+        <p>
+          KDA's fixed-size inference state does not make its training activations constant-size: token and chunk intermediates still need storage or
+          recomputation. Varlen FlashAttention avoids materializing the full attention-probability matrix for MLA, but still needs Q/K/V, outputs, and
+          backward statistics. Neither attention path has a zero activation-memory bill.
+        </p>
+        <aside class="callout">
+          <strong>Checkpointing and virtual stages solve different problems.</strong> Recompute reduces saved internal activations. Smaller virtual
+          stages can reduce the largest simultaneously gathered FSDP unit, if the runtime limits active unsharded stages. They do not remove the
+          master or momentum state for the other virtual stage. The default here is ordinary 1F1B with one stage per PP rank, not an interleaved or
+          DualPipe schedule.
+        </aside>
+      </section>
+
+      <section id="fitdeck">
+        <div class="eyebrow">An interactive fitting walkthrough</div>
+        <h2>From a 30-TiB state bill to a local budget</h2>
+        <p>
+          Each step changes one ownership or activation assumption. The same FP32-master / FP32-state / BF16-compute policy is kept throughout.
+          Component lengths below use a logarithmic axis; add the numeric values, not bar lengths.
+        </p>
+        <article class="card deck">
+          <div class="deck-toolbar">
+            <button id="deck-prev" type="button" aria-label="Previous step">&#8592;</button><span id="deck-position"></span
+            ><button id="deck-next" type="button" aria-label="Next step">&#8594;</button>
+          </div>
+          <h3 id="deck-title"></h3>
+          <p id="deck-description"></p>
+          <div id="deck-bars" class="log-bars"></div>
+          <div class="log-axis"><span>1 MiB</span><span>1 GiB</span><span>64 GiB</span><span>64 TiB</span></div>
+          <p id="deck-total" class="deck-total"></p>
+          <p class="note" id="deck-caveat"></p>
+          <button type="button" id="deck-apply">Explore this step in the memory lab</button>
+        </article>
+      </section>
+
+      <section id="reality">
+        <div class="eyebrow">Model versus implementation</div>
+        <h2>A measured run is the capacity proof</h2>
+        <div class="measurement card">
+          <div><span class="eyebrow">4K / 512-GPU reference</span><strong>146.18 GiB</strong><span>maximum logged tensor allocation</span></div>
+          <div><span class="eyebrow">Device capacity</span><strong>184.31 GiB</strong><span>reported by the training runtime</span></div>
+          <div>
+            <span class="eyebrow">Arithmetic difference</span><strong>38.13 GiB</strong><span>20.69% &mdash; not guaranteed usable slack</span>
+          </div>
+        </div>
+        <p>
+          The reference completed 12 updates with FP32 resident state, BF16 compute, PP8 / FSDP64 / EP64, full layer checkpointing, varlen attention,
+          compiled pointwise regions, no CUDA graphs, and forced-balanced HybridEP routing. It demonstrates short-run feasibility of this specific
+          configuration; it is not a general capacity guarantee or a convergence result. The fixed reference stays fixed when you change calculator
+          controls.
+        </p>
+        <p>
+          The calculator deliberately does not label the gap between its subtotal and 146.18 GiB as &ldquo;activation memory.&rdquo; That would invent
+          a decomposition. Some important reasons implementations exceed a state-only estimate:
+        </p>
+        <div class="pitfall-grid">
+          <article class="card">
+            <h3>Deferred PP gradients</h3>
+            <p>
+              Gradient accumulation can retain unreduced stage gradients until the schedule finishes. A reduced FP32 shard and an unreduced FP32 dense
+              gradient differ by the FSDP factor. Repeated backward calls do not create 64 independent parameter-gradient histories.
+            </p>
+          </article>
+          <article class="card">
+            <h3>Gather / reduction buffers</h3>
+            <p>
+              A casted input shard, all-gather output, compute view, and reduce-scatter input may briefly overlap. Retaining every in-flight buffer
+              defeats an otherwise good memory budget. Resharding and bounded buffer lifetimes matter as much as dtype.
+            </p>
+          </article>
+          <article class="card">
+            <h3>SiTU-GLU temporaries</h3>
+            <p>
+              Gate/up products cover routed assignments, not just original tokens. Eager FP32 pointwise intermediates occupy HBM. Compiling the
+              pointwise region can fuse intermediates and shorten their lifetimes; it does not compress the FP32 master weights.
+            </p>
+          </article>
+          <article class="card">
+            <h3>Muon working layouts</h3>
+            <p>
+              DistMuon redistributes shards into logical matrices before its update. The storage layout, compute layout, communication buffers, BF16
+              iteration copy, and Gram matrices have different lifetimes. Transient buffers avoid paying optimizer-only storage during model compute.
+            </p>
+          </article>
+          <article class="card">
+            <h3>Memory outside PyTorch</h3>
+            <p>
+              NCCL can allocate workspace outside PyTorch's caching allocator. Unused cached blocks are not necessarily available to NCCL.
+              Communicator initialization order and runtime connection policy can therefore change whether an otherwise identical run starts.
+            </p>
+          </article>
+          <article class="card">
+            <h3>Graphs and precision shortcuts</h3>
+            <p>
+              CUDA graphs can retain private pools and captured buffers. BF16 reduction alone does not shrink FP32 master, optimizer-visible gradient,
+              or momentum shards. Neither graph capture nor lower reduction precision is a free state-memory reduction.
+            </p>
+          </article>
+        </div>
+        <p class="note">
+          Tensor allocation, allocator reservation, and total device usage are different measurements. The reported 38.13-GiB difference ignores
+          external allocations and fragmentation. Check every PP rank and the first optimizer update, not only the first forward. Also check later
+          iterations, when momentum and caches are populated.
+        </p>
+      </section>
+
+      <section class="sources" id="sources">
+        <h2>Sources and accounting notes</h2>
+        <ol>
+          <li>
+            <a href="https://github.com/MoonshotAI/Kimi-K3/blob/main/k3_tech_report.pdf">Kimi K3 technical report</a> and
+            <a href="https://huggingface.co/moonshotai/Kimi-K3/blob/main/config.json">released configuration</a>: architecture and logical dimensions.
+          </li>
+          <li>
+            <a href="https://github.com/pytorch/torchtitan/tree/main/torchtitan/models/kimi_k3">TorchTitan Kimi K3</a> and
+            <a href="https://github.com/pytorch/torchtitan/blob/main/torchtitan/distributed/flex_shard/dist_muon.py">DistMuon</a>: parameter shapes,
+            momentum storage, and Newton&ndash;Schulz computation. Optimizer assignments and lifecycle settings refer to the recipe analyzed here, not
+            every upstream recipe.
+          </li>
+          <li>
+            <a href="https://docs.pytorch.org/docs/stable/distributed.fsdp.fully_shard.html">PyTorch FSDP</a> and
+            <a href="https://docs.pytorch.org/docs/stable/distributed.pipelining.html">pipeline parallelism</a>: mixed precision, sharded storage, and
+            schedule concepts.
+          </li>
+          <li>
+            Presentation inspired by <a href="https://deepseek-v3.ezyang.com/studies/02-hopper-memory.html">Edward Yang's Hopper memory study</a>.
+            This page uses Kimi K3, GB200, Muon, and the stated FSDP/PP policy; it does not transplant DeepSeek's AdamW or DualPipe assumptions.
+          </li>
+        </ol>
+        <p>
+          GiB = 2<sup>30</sup> bytes; TiB = 2<sup>40</sup> bytes. Structural totals match study 01. Shards are modeled by ideal division, ignoring
+          per-tensor padding. Non-default PP splits are contiguous illustrative partitions, not validated launch recipes. The selected-activation
+          model omits kernel-specific state and may include candidates an implementation aliases or recomputes. No internal run links, data paths, or
+          cluster identifiers are included.
+        </p>
+        <nav class="series-footer" aria-label="Previous Kimi K3 study">
+          <a href="./kimi-k3.html">&#8592; Previous: Study 01 &mdash; Architecture</a>
+        </nav>
+      </section>
+    </main>
+  </body>
+</html>
