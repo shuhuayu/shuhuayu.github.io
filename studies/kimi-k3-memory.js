@@ -1,15 +1,7 @@
 (() => {
   const GiB = 2 ** 30;
   const capacity = 184.31 * GiB;
-  const D = 7168;
-  const H = 96;
-  const C = H * 128;
-  const Z = 3584;
-  const F = 3072;
-  const experts = 896;
-  const topK = 16;
-  const embedding = 1174405120;
-  const vision = 447358976;
+  const { D, H, C, Z, F, experts, topK, layers, partition } = window.KimiK3Model;
   const keys = ["pp", "ep", "fsdp", "stage", "seq", "rows", "mbs", "ac", "unit", "grad", "reserve"];
   const controls = Object.fromEntries(keys.map((key) => [key, document.getElementById(`mem-${key}`)]));
   const defaults = { pp: 8, ep: 64, fsdp: "on", stage: 3, seq: 4096, rows: 1, mbs: 64, ac: "full", unit: "stage", grad: "deferred", reserve: 24 };
@@ -30,35 +22,6 @@
         : `${(value / 2 ** 20).toFixed(2)} MiB`;
   const count = (value) => (value >= 1e12 ? `${(value / 1e12).toFixed(3)}T` : value >= 1e9 ? `${(value / 1e9).toFixed(3)}B` : value.toLocaleString());
   const sum = (items, get) => items.reduce((total, item) => total + get(item), 0);
-  const layers = Array.from({ length: 93 }, (_, i) => {
-    const mla = (i + 1) % 4 === 0 || i === 92;
-    const attention = mla ? 232196096 : 443740384;
-    const ffn = i === 0 ? 726663168 : 132120576 + 51383808 + 6422528;
-    const norms = 2 * D + (i === 0 ? 2 : 4) * D;
-    return {
-      index: i,
-      mla,
-      dense: attention + ffn + norms,
-      routed: i === 0 ? 0 : 29595009024,
-      adam: (mla ? 2048 : 848096) + (i === 0 ? 0 : Z) + norms,
-    };
-  });
-
-  function partition(pp, stage) {
-    const chunk = Math.ceil(layers.length / pp);
-    const owned = layers.slice(stage * chunk, Math.min((stage + 1) * chunk, layers.length));
-    const front = stage === 0 ? embedding + vision : 0;
-    const back = stage === pp - 1 ? embedding + 3 * D : 0;
-    return {
-      layers: owned,
-      dense: sum(owned, (l) => l.dense) + front + back,
-      routed: sum(owned, (l) => l.routed),
-      adam: sum(owned, (l) => l.adam) + front + back,
-      front,
-      back,
-    };
-  }
-
   function activationCandidates(layer, tokens) {
     const input = tokens * D * 2;
     const attention = layer.mla ? tokens * (2 * H * 192 + 3 * C + 1536 + 576) * 2 : tokens * (5 * C * 2 + C * 4 + H * 4);

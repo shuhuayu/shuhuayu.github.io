@@ -1,0 +1,372 @@
+:root {
+  --mla: #d46b2c;
+  --roof-blue: #3974ad;
+}
+html.dark {
+  --mla: #f1a06f;
+  --roof-blue: #83b8e8;
+}
+body {
+  background: radial-gradient(ellipse at 80% 0, color-mix(in srgb, var(--kda-soft) 70%, transparent), transparent 36rem), var(--paper);
+}
+input {
+  font: inherit;
+  color: inherit;
+}
+.controls input {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 8px;
+  background: var(--card);
+}
+input:focus-visible {
+  outline: 2px solid var(--kda);
+  outline-offset: 3px;
+}
+.roof-equation {
+  display: block;
+  margin-top: 12px;
+  font-family: Georgia, serif;
+  font-size: clamp(20px, 2.5vw, 29px);
+  font-weight: 500;
+  line-height: 1.4;
+}
+.preset-bar,
+.gemm-buttons,
+.export-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 22px 0;
+}
+.preset-bar button,
+.gemm-buttons button {
+  font-size: 12px;
+  padding: 8px 11px;
+}
+.shape-caption {
+  font-family: ui-monospace, monospace;
+  font-size: 13px;
+  padding: 14px 18px;
+  border-left: 3px solid var(--kda);
+  background: var(--kda-soft);
+}
+.roof-results {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+.roof-results .big-number {
+  font-size: clamp(27px, 3.1vw, 39px);
+}
+.roof-figure {
+  margin: 24px 0 0;
+}
+#roof-chart {
+  display: block;
+  width: 100%;
+  height: auto;
+  overflow: visible;
+}
+#roof-chart text {
+  fill: var(--muted);
+  font:
+    12px ui-sans-serif,
+    system-ui,
+    sans-serif;
+}
+#roof-chart .plot-label {
+  font-size: 13px;
+  fill: var(--ink);
+}
+#roof-chart .plot-grid {
+  stroke: var(--line);
+  stroke-width: 1;
+}
+#roof-chart .plot-roof {
+  stroke: var(--kda);
+  stroke-width: 3;
+  fill: none;
+}
+#roof-chart .plot-ceiling {
+  stroke: var(--line);
+  stroke-dasharray: 4 5;
+}
+#roof-chart .plot-area {
+  fill: var(--kda-soft);
+  opacity: 0.65;
+}
+#roof-chart .plot-dot {
+  fill: var(--card);
+  stroke: var(--roof-blue);
+  stroke-width: 2;
+}
+#roof-chart .plot-dot.selected {
+  fill: var(--moe);
+  stroke: var(--moe);
+}
+#roof-chart .plot-halo {
+  fill: none;
+  stroke: var(--moe);
+  stroke-width: 1;
+  opacity: 0.5;
+}
+#roof-chart .point-label {
+  fill: var(--moe);
+  font-size: 12px;
+  font-weight: 650;
+}
+.gemm-inspector {
+  padding: 18px 20px;
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--moe);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--moe) 5%, var(--card));
+}
+.gemm-inspector h3 {
+  margin: 0 0 12px;
+}
+.gemm-inspector .gemm-stats {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+.gemm-stats strong,
+.gemm-stats span {
+  display: block;
+}
+.gemm-stats strong {
+  font:
+    20px Georgia,
+    serif;
+  color: var(--moe);
+}
+.gemm-stats span {
+  color: var(--muted);
+  font-size: 11px;
+  margin-top: 5px;
+}
+figcaption {
+  font-size: 12px;
+  color: var(--muted);
+  margin-top: 20px;
+  line-height: 1.6;
+}
+.matmul-flow {
+  display: grid;
+  grid-template-columns: 1fr 24px 1fr 24px 1fr;
+  gap: 12px;
+  align-items: center;
+  margin: 28px 0;
+}
+.matmul-flow article {
+  display: grid;
+  gap: 12px;
+  border: 1px solid var(--line);
+  border-top: 3px solid var(--kda);
+  background: var(--card);
+  border-radius: 10px;
+  padding: 20px;
+  text-align: center;
+}
+.matmul-flow > span {
+  text-align: center;
+  color: var(--muted);
+}
+.matmul-flow article > span,
+.matmul-flow small {
+  font-size: 12px;
+  color: var(--muted);
+}
+.matmul-flow strong {
+  font:
+    22px Georgia,
+    serif;
+}
+.cost-bars {
+  display: grid;
+  gap: 15px;
+  margin: 25px 0;
+}
+.cost-row {
+  display: grid;
+  grid-template-columns: minmax(170px, 1.3fr) minmax(130px, 2fr) minmax(90px, 0.7fr);
+  gap: 15px;
+  align-items: center;
+  font-size: 13px;
+}
+.cost-track {
+  height: 23px;
+  background: color-mix(in srgb, var(--line) 45%, transparent);
+  border-radius: 4px;
+  overflow: hidden;
+}
+.cost-fill {
+  height: 100%;
+  background: var(--kda);
+  border-radius: 4px;
+}
+.cost-value {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.fold {
+  margin: 24px 0;
+}
+.fold summary {
+  font-size: 14px;
+  font-weight: 650;
+  cursor: pointer;
+}
+.transport-flow {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin: 24px 0;
+}
+.transport-flow article {
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--moe);
+  background: var(--card);
+  padding: 16px;
+  border-radius: 8px;
+}
+.transport-flow strong,
+.transport-flow span {
+  display: block;
+}
+.transport-flow strong {
+  font-size: 14px;
+}
+.transport-flow span {
+  font-size: 12px;
+  color: var(--muted);
+  margin-top: 7px;
+}
+.dependency-chain {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+  margin: 28px 0;
+}
+.dependency-chain span {
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--card);
+}
+.dependency-chain b {
+  color: var(--muted);
+}
+.dependency-chain .dependency-comm {
+  border-color: var(--mla);
+  color: var(--mla);
+}
+.resource-card {
+  margin-top: 24px;
+}
+.bubble-track {
+  display: flex;
+  height: 42px;
+  margin: 24px 0 10px;
+  border-radius: 6px;
+  overflow: hidden;
+  font-size: 12px;
+}
+.bubble-track span {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+#bubble-useful {
+  background: var(--kda-soft);
+  color: var(--kda);
+}
+#bubble-idle {
+  background: repeating-linear-gradient(135deg, var(--line), var(--line) 3px, var(--card) 3px, var(--card) 8px);
+}
+.packet-chart {
+  margin-top: 25px;
+}
+.packet-row {
+  display: grid;
+  grid-template-columns: 90px 1fr 160px;
+  gap: 12px;
+  margin: 12px 0;
+  font-size: 12px;
+  align-items: center;
+}
+.packet-blocks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+}
+.packet-blocks span {
+  width: 16px;
+  height: 24px;
+  background: var(--activation);
+  border-radius: 2px;
+}
+.packet-blocks span:first-child {
+  background: var(--kda);
+}
+.packet-row > span:last-child {
+  text-align: right;
+  color: var(--muted);
+}
+.muon-flow article {
+  border-top-color: var(--moe);
+}
+.sources button {
+  font-size: 13px;
+}
+@media (max-width: 780px) {
+  .roof-results {
+    grid-template-columns: 1fr;
+  }
+  .gemm-inspector .gemm-stats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .cost-row {
+    grid-template-columns: minmax(110px, 1fr) minmax(90px, 1fr) 80px;
+    gap: 10px;
+    font-size: 11px;
+  }
+  .matmul-flow {
+    grid-template-columns: 1fr;
+    gap: 6px;
+  }
+  .matmul-flow article {
+    padding: 15px;
+  }
+  .transport-flow {
+    grid-template-columns: 1fr;
+  }
+  .packet-row {
+    grid-template-columns: 70px 1fr;
+  }
+  .packet-row > span:last-child {
+    grid-column: 2;
+    text-align: left;
+  }
+}
+@media print {
+  .preset-bar,
+  #roof-controls,
+  .gemm-buttons,
+  #roof-stage-buttons,
+  #show-critical,
+  .export-actions {
+    display: none;
+  }
+  .card,
+  .roof-figure {
+    break-inside: avoid;
+    box-shadow: none;
+  }
+  body {
+    background: white;
+  }
+}
