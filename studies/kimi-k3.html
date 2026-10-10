@@ -1,0 +1,1642 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="An infra-oriented, interactive guide to the Kimi K3 architecture: KDA, Gated MLA, Attention Residuals, Stable LatentMoE, MoonViT-V2, parameter counts, cache scaling, and training infrastructure."
+    />
+    <title>An infra-oriented diagram of Kimi K3</title>
+    <meta name="robots" content="noindex, follow" />
+    <link rel="stylesheet" href="./kimi-k3-diagram.css" />
+    <script src="./kimi-k3-diagram.js" defer></script>
+    <style>
+      :root {
+        color-scheme: light;
+        --paper: #f7f4ec;
+        --paper-deep: #eee8dc;
+        --card: #fffdf8;
+        --ink: #171814;
+        --muted: #696a62;
+        --line: #d9d3c6;
+        --line-strong: #aaa395;
+        --kda: #0d887d;
+        --kda-soft: #dff3ef;
+        --mla: #d46b2c;
+        --mla-soft: #fbe8da;
+        --moe: #7652b8;
+        --moe-soft: #ede6f8;
+        --vision: #3974ad;
+        --vision-soft: #e1edf8;
+        --residual: #b84d6d;
+        --residual-soft: #f8e2e9;
+        --gold: #a87816;
+        --gold-soft: #f8edc8;
+        --shadow: 0 14px 42px rgba(45, 37, 24, 0.08);
+        --radius: 14px;
+      }
+
+      html.dark {
+        color-scheme: dark;
+        --paper: #151613;
+        --paper-deep: #20211d;
+        --card: #1b1c18;
+        --ink: #f1eee5;
+        --muted: #aaa99f;
+        --line: #3d3e37;
+        --line-strong: #686961;
+        --kda: #5dd1c2;
+        --kda-soft: #173b37;
+        --mla: #f1a06f;
+        --mla-soft: #442c20;
+        --moe: #b69ae6;
+        --moe-soft: #34294a;
+        --vision: #83b8e8;
+        --vision-soft: #20384d;
+        --residual: #e694ac;
+        --residual-soft: #482630;
+        --gold: #e3bd66;
+        --gold-soft: #41371f;
+        --shadow: 0 16px 46px rgba(0, 0, 0, 0.28);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+      html {
+        scroll-behavior: smooth;
+      }
+      body {
+        margin: 0;
+        background: radial-gradient(circle at 12% 0%, color-mix(in srgb, var(--kda-soft) 62%, transparent), transparent 31rem),
+          radial-gradient(circle at 90% 14%, color-mix(in srgb, var(--mla-soft) 58%, transparent), transparent 29rem), var(--paper);
+        color: var(--ink);
+        font-family:
+          Inter,
+          ui-sans-serif,
+          system-ui,
+          -apple-system,
+          BlinkMacSystemFont,
+          "Segoe UI",
+          sans-serif;
+        line-height: 1.62;
+      }
+
+      a {
+        color: var(--vision);
+        text-underline-offset: 0.18em;
+      }
+      code,
+      .mono {
+        font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+        font-size: 0.92em;
+      }
+
+      .page {
+        width: min(1120px, calc(100% - 36px));
+        margin: 0 auto;
+        padding: 34px 0 80px;
+      }
+
+      .topline {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+        margin-bottom: 44px;
+        color: var(--muted);
+        font-size: 13px;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+      }
+
+      .actions {
+        display: flex;
+        gap: 8px;
+      }
+      button {
+        color: inherit;
+        font: inherit;
+      }
+      .small-button {
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        background: color-mix(in srgb, var(--card) 88%, transparent);
+        padding: 6px 11px;
+        cursor: pointer;
+      }
+      .small-button:hover {
+        border-color: var(--line-strong);
+      }
+
+      .hero {
+        padding: 24px 0 28px;
+      }
+      .eyebrow {
+        color: var(--kda);
+        font-size: 12px;
+        font-weight: 750;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+      }
+      h1 {
+        max-width: 900px;
+        margin: 10px 0 18px;
+        font-family: Georgia, "Times New Roman", serif;
+        font-size: clamp(42px, 7vw, 78px);
+        font-weight: 500;
+        letter-spacing: -0.045em;
+        line-height: 0.98;
+      }
+      .dek {
+        max-width: 850px;
+        margin: 0;
+        color: var(--muted);
+        font-family: Georgia, "Times New Roman", serif;
+        font-size: clamp(19px, 2.4vw, 27px);
+        line-height: 1.35;
+      }
+      .disclosure {
+        max-width: 850px;
+        margin: 22px 0 0;
+        padding-left: 13px;
+        border-left: 3px solid var(--gold);
+        color: var(--muted);
+        font-size: 13px;
+      }
+
+      .stats {
+        display: grid;
+        grid-template-columns: repeat(6, minmax(0, 1fr));
+        gap: 8px;
+        margin: 34px 0 6px;
+      }
+      .stat {
+        min-height: 94px;
+        padding: 14px 14px 12px;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        background: color-mix(in srgb, var(--card) 85%, transparent);
+      }
+      .stat strong {
+        display: block;
+        font-family: Georgia, "Times New Roman", serif;
+        font-size: 27px;
+        font-weight: 500;
+        line-height: 1;
+      }
+      .stat span {
+        display: block;
+        margin-top: 8px;
+        color: var(--muted);
+        font-size: 11px;
+        line-height: 1.3;
+      }
+
+      section {
+        margin-top: 74px;
+      }
+      h2 {
+        margin: 0 0 12px;
+        font-family: Georgia, "Times New Roman", serif;
+        font-size: clamp(30px, 4vw, 45px);
+        font-weight: 500;
+        letter-spacing: -0.025em;
+        line-height: 1.08;
+      }
+      h3 {
+        margin: 0 0 8px;
+        font-size: 17px;
+        line-height: 1.25;
+      }
+      .section-lede {
+        max-width: 810px;
+        color: var(--muted);
+      }
+      .note {
+        color: var(--muted);
+        font-size: 13px;
+      }
+
+      .card {
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        background: color-mix(in srgb, var(--card) 94%, transparent);
+        box-shadow: var(--shadow);
+      }
+
+      .anatomy {
+        margin-top: 24px;
+        padding: 20px;
+        overflow: hidden;
+      }
+      .anatomy-grid {
+        display: grid;
+        grid-template-columns: minmax(170px, 0.75fr) 32px minmax(500px, 2.5fr) 32px minmax(150px, 0.65fr);
+        align-items: center;
+        gap: 8px;
+      }
+      .flow-arrow {
+        color: var(--line-strong);
+        font-size: 24px;
+        text-align: center;
+      }
+      .tower,
+      .backbone,
+      .head {
+        border: 1px solid var(--line);
+        border-radius: 11px;
+        background: var(--card);
+        padding: 15px;
+      }
+      .tower {
+        border-top: 4px solid var(--vision);
+      }
+      .backbone {
+        border-top: 4px solid var(--kda);
+      }
+      .head {
+        border-top: 4px solid var(--gold);
+      }
+      .tower .label,
+      .head .label,
+      .backbone .label {
+        color: var(--muted);
+        font-size: 10px;
+        font-weight: 750;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+      }
+      .tower strong,
+      .head strong,
+      .backbone strong {
+        display: block;
+        margin-top: 4px;
+      }
+      .mini-stack {
+        display: grid;
+        gap: 7px;
+        margin-top: 12px;
+      }
+      .mini-node {
+        border: 1px solid var(--line);
+        border-radius: 7px;
+        background: var(--paper);
+        padding: 7px 9px;
+        font-size: 11px;
+        line-height: 1.25;
+      }
+      .block-cycle {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(80px, 1fr));
+        gap: 7px;
+        margin: 12px 0;
+      }
+      .cycle-cell {
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 9px 8px;
+        text-align: center;
+        font-size: 12px;
+        font-weight: 700;
+      }
+      .cycle-cell.kda {
+        color: var(--kda);
+        background: var(--kda-soft);
+      }
+      .cycle-cell.mla {
+        color: var(--mla);
+        background: var(--mla-soft);
+      }
+      .moe-ribbon {
+        padding: 8px 10px;
+        border: 1px solid color-mix(in srgb, var(--moe) 50%, var(--line));
+        border-radius: 8px;
+        background: var(--moe-soft);
+        color: var(--moe);
+        font-size: 12px;
+        font-weight: 700;
+        text-align: center;
+      }
+      .residual-rail {
+        margin-top: 10px;
+        padding: 8px 10px;
+        border: 1px dashed var(--residual);
+        border-radius: 8px;
+        background: var(--residual-soft);
+        color: var(--residual);
+        font-size: 11px;
+        text-align: center;
+      }
+
+      .legend {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 14px;
+        margin: 16px 0 10px;
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .legend span::before {
+        display: inline-block;
+        width: 9px;
+        height: 9px;
+        margin-right: 6px;
+        border-radius: 2px;
+        background: var(--legend-color);
+        content: "";
+      }
+
+      .layer-map {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 8px;
+        margin-top: 14px;
+      }
+      .layer-group {
+        padding: 9px;
+        border: 1px solid var(--line);
+        border-radius: 9px;
+        background: var(--card);
+      }
+      .layer-group-label {
+        display: flex;
+        justify-content: space-between;
+        margin-bottom: 7px;
+        color: var(--muted);
+        font-size: 10px;
+      }
+      .layer-tiles {
+        display: grid;
+        grid-template-columns: repeat(6, 1fr);
+        gap: 4px;
+      }
+      .layer-tile {
+        aspect-ratio: 1;
+        min-width: 0;
+        border: 1px solid transparent;
+        border-radius: 4px;
+        color: #fff;
+        font-size: 9px;
+        font-weight: 750;
+        cursor: pointer;
+      }
+      .layer-tile.kda {
+        background: var(--kda);
+      }
+      .layer-tile.mla {
+        background: var(--mla);
+      }
+      .layer-tile.dense {
+        outline: 2px solid var(--gold);
+        outline-offset: 1px;
+      }
+      .layer-tile.selected {
+        border-color: var(--ink);
+        box-shadow:
+          0 0 0 2px var(--card),
+          0 0 0 4px var(--ink);
+      }
+      .layer-readout {
+        display: flex;
+        align-items: baseline;
+        gap: 12px;
+        min-height: 50px;
+        margin-top: 12px;
+        padding: 10px 12px;
+        border-radius: 8px;
+        background: var(--paper-deep);
+        font-size: 13px;
+      }
+      .layer-readout strong {
+        min-width: 72px;
+      }
+
+      .reading-notes {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 12px;
+        margin-top: 18px;
+      }
+      .reading-note {
+        padding: 16px 17px;
+        border-top: 2px solid var(--accent);
+        background: color-mix(in srgb, var(--card) 76%, transparent);
+      }
+      .reading-note p {
+        margin: 0;
+        color: var(--muted);
+        font-size: 13px;
+      }
+
+      .tabs {
+        display: flex;
+        gap: 6px;
+        overflow-x: auto;
+        padding: 4px 1px 10px;
+      }
+      .tab {
+        flex: 0 0 auto;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        background: var(--card);
+        padding: 7px 12px;
+        color: var(--muted);
+        cursor: pointer;
+        font-size: 12px;
+        font-weight: 700;
+      }
+      .tab[aria-selected="true"] {
+        border-color: var(--ink);
+        background: var(--ink);
+        color: var(--paper);
+      }
+      .component-panel {
+        display: none;
+        padding: 20px;
+      }
+      .component-panel.active {
+        display: block;
+      }
+      .component-intro {
+        display: grid;
+        grid-template-columns: 1.2fr 0.8fr;
+        gap: 24px;
+        align-items: start;
+      }
+      .component-intro p {
+        margin-top: 0;
+      }
+      .equation {
+        overflow-x: auto;
+        border-left: 3px solid var(--accent, var(--kda));
+        background: var(--paper);
+        padding: 12px 14px;
+        font-family: Georgia, "Times New Roman", serif;
+        font-size: 17px;
+        white-space: nowrap;
+      }
+      .fact-list {
+        display: grid;
+        gap: 7px;
+        margin: 0;
+        padding: 0;
+        list-style: none;
+      }
+      .fact-list li {
+        display: flex;
+        justify-content: space-between;
+        gap: 14px;
+        border-bottom: 1px solid var(--line);
+        padding: 5px 0;
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .fact-list strong {
+        color: var(--ink);
+        text-align: right;
+      }
+
+      .flow {
+        display: flex;
+        align-items: stretch;
+        gap: 7px;
+        margin-top: 20px;
+        overflow-x: auto;
+        padding: 4px 2px 10px;
+      }
+      .flow-node {
+        display: flex;
+        flex: 1 0 125px;
+        min-height: 76px;
+        flex-direction: column;
+        justify-content: center;
+        border: 1px solid var(--line);
+        border-radius: 9px;
+        background: var(--paper);
+        padding: 10px;
+        text-align: center;
+        line-height: 1.22;
+      }
+      .flow-node strong {
+        font-size: 12px;
+      }
+      .flow-node small {
+        margin-top: 5px;
+        color: var(--muted);
+        font-size: 10px;
+      }
+      .flow-node.accent {
+        border-color: var(--accent);
+        background: var(--accent-soft);
+      }
+      .flow .flow-arrow {
+        display: flex;
+        align-items: center;
+        font-size: 19px;
+      }
+      .branch-grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 9px;
+        margin-top: 16px;
+      }
+      .branch {
+        border: 1px solid var(--line);
+        border-radius: 9px;
+        background: var(--paper);
+        padding: 12px;
+      }
+      .branch strong {
+        display: block;
+        font-size: 12px;
+      }
+      .branch span {
+        color: var(--muted);
+        font-size: 11px;
+      }
+
+      .param-controls {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 14px;
+        margin: 22px 0 12px;
+      }
+      .segmented {
+        display: inline-flex;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        overflow: hidden;
+      }
+      .segmented button {
+        border: 0;
+        border-right: 1px solid var(--line);
+        background: var(--card);
+        padding: 7px 11px;
+        color: var(--muted);
+        cursor: pointer;
+        font-size: 12px;
+      }
+      .segmented button:last-child {
+        border-right: 0;
+      }
+      .segmented button.active {
+        background: var(--ink);
+        color: var(--paper);
+      }
+      .param-total {
+        font-family: Georgia, "Times New Roman", serif;
+        font-size: 29px;
+      }
+      .param-bar {
+        display: flex;
+        height: 48px;
+        overflow: hidden;
+        border: 1px solid var(--line);
+        border-radius: 9px;
+        background: var(--paper-deep);
+      }
+      .param-segment {
+        position: relative;
+        min-width: 0;
+        transition: flex-grow 260ms ease;
+      }
+      .param-segment:hover {
+        filter: brightness(1.08);
+      }
+      .param-detail-grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 7px 15px;
+        margin-top: 18px;
+      }
+      .param-row {
+        display: grid;
+        grid-template-columns: 10px 1fr auto;
+        align-items: center;
+        gap: 7px;
+        padding: 5px 0;
+        border-bottom: 1px solid var(--line);
+        font-size: 11px;
+      }
+      .swatch {
+        width: 9px;
+        height: 9px;
+        border-radius: 2px;
+      }
+      .param-row .value {
+        color: var(--muted);
+        font-family: "SFMono-Regular", Consolas, monospace;
+      }
+      .derivation {
+        margin-top: 18px;
+        padding: 14px 16px;
+        border: 1px solid var(--line);
+        border-radius: 9px;
+        background: var(--paper);
+        font-size: 13px;
+      }
+
+      .cache-tool {
+        display: grid;
+        grid-template-columns: 260px 1fr;
+        gap: 22px;
+        margin-top: 22px;
+        padding: 20px;
+      }
+      .controls label {
+        display: block;
+        margin: 0 0 18px;
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .controls strong {
+        display: block;
+        margin-bottom: 7px;
+        color: var(--ink);
+      }
+      input[type="range"] {
+        width: 100%;
+        accent-color: var(--kda);
+      }
+      select {
+        width: 100%;
+        border: 1px solid var(--line);
+        border-radius: 7px;
+        background: var(--card);
+        color: var(--ink);
+        padding: 8px;
+      }
+      .cache-bars {
+        display: grid;
+        gap: 14px;
+        align-content: center;
+      }
+      .cache-row {
+        display: grid;
+        grid-template-columns: 155px 1fr 92px;
+        align-items: center;
+        gap: 10px;
+        font-size: 12px;
+      }
+      .track {
+        height: 17px;
+        overflow: hidden;
+        border-radius: 999px;
+        background: var(--paper-deep);
+      }
+      .fill {
+        height: 100%;
+        min-width: 2px;
+        border-radius: inherit;
+        transition: width 220ms ease;
+      }
+      .cache-value {
+        color: var(--muted);
+        text-align: right;
+        font-family: "SFMono-Regular", Consolas, monospace;
+      }
+      .formula {
+        grid-column: 1 / -1;
+        margin: 5px 0 0;
+        color: var(--muted);
+        font-size: 11px;
+      }
+
+      .infra-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 13px;
+        margin-top: 20px;
+      }
+      .infra-card {
+        padding: 17px;
+        border-top: 3px solid var(--accent);
+      }
+      .infra-card p {
+        margin: 0;
+        color: var(--muted);
+        font-size: 13px;
+      }
+      .system-flow {
+        display: grid;
+        grid-template-columns: repeat(5, minmax(0, 1fr));
+        gap: 7px;
+        margin-top: 18px;
+        padding: 15px;
+      }
+      .system-step {
+        position: relative;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 10px;
+        background: var(--paper);
+        font-size: 11px;
+        text-align: center;
+      }
+      .system-step:not(:last-child)::after {
+        position: absolute;
+        top: 50%;
+        right: -9px;
+        z-index: 2;
+        width: 10px;
+        color: var(--line-strong);
+        content: ">";
+        transform: translateY(-50%);
+      }
+
+      .callout {
+        margin-top: 20px;
+        padding: 16px 18px;
+        border: 1px solid var(--gold);
+        border-radius: 10px;
+        background: var(--gold-soft);
+        font-size: 13px;
+      }
+      .callout strong {
+        color: var(--gold);
+      }
+
+      .sources {
+        padding-top: 24px;
+        border-top: 1px solid var(--line);
+        color: var(--muted);
+        font-size: 13px;
+      }
+      .sources ol {
+        padding-left: 20px;
+      }
+      .sources li {
+        margin: 7px 0;
+      }
+
+      @media (max-width: 850px) {
+        .stats {
+          grid-template-columns: repeat(3, 1fr);
+        }
+        .anatomy-grid {
+          grid-template-columns: 1fr;
+        }
+        .anatomy-grid > .flow-arrow {
+          transform: rotate(90deg);
+        }
+        .layer-map {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+        .component-intro,
+        .cache-tool {
+          grid-template-columns: 1fr;
+        }
+        .param-detail-grid {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+        .system-flow {
+          grid-template-columns: 1fr;
+        }
+        .system-step:not(:last-child)::after {
+          top: auto;
+          right: 50%;
+          bottom: -16px;
+          transform: rotate(90deg);
+        }
+      }
+      @media (max-width: 560px) {
+        .page {
+          width: min(100% - 22px, 1120px);
+          padding-top: 18px;
+        }
+        .topline {
+          margin-bottom: 22px;
+        }
+        .stats {
+          grid-template-columns: repeat(2, 1fr);
+        }
+        .block-cycle {
+          grid-template-columns: repeat(2, 1fr);
+        }
+        .layer-map,
+        .reading-notes,
+        .infra-grid,
+        .param-detail-grid {
+          grid-template-columns: 1fr;
+        }
+        .branch-grid {
+          grid-template-columns: 1fr;
+        }
+        .cache-row {
+          grid-template-columns: 105px 1fr 74px;
+        }
+      }
+      @media print {
+        :root {
+          --paper: #fff;
+          --card: #fff;
+          --shadow: none;
+        }
+        body {
+          background: #fff;
+        }
+        .actions,
+        .tabs,
+        .controls {
+          display: none !important;
+        }
+        .component-panel {
+          display: block;
+          break-inside: avoid;
+          margin-bottom: 14px;
+        }
+        .component-panel::before {
+          content: attr(data-print-title);
+          display: block;
+          margin-bottom: 8px;
+          font-weight: 700;
+        }
+        .card {
+          box-shadow: none;
+        }
+        section {
+          break-inside: avoid;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="page">
+      <div class="topline">
+        <span>Kimi K3 / architecture study</span>
+        <div class="actions">
+          <button class="small-button" id="theme-toggle" type="button">Dark</button>
+          <button class="small-button" type="button" onclick="window.print()">Print</button>
+        </div>
+      </div>
+
+      <header class="hero">
+        <div class="eyebrow">Sequence &middot; depth &middot; width</div>
+        <h1>An infra-oriented diagram of Kimi K3</h1>
+        <p class="dek">
+          A 2.8-trillion-parameter model whose compute path is easier to understand as three orthogonal routing systems: KDA and MLA route information
+          through time, Attention Residuals route it through depth, and Stable LatentMoE routes it through channels.
+        </p>
+        <p class="disclosure">
+          Based on the <a href="https://huggingface.co/moonshotai/Kimi-K3">Kimi K3 technical report and released configuration</a>, with computation
+          paths traced through TorchTitan. The diagrams show logical tensor shapes before parallelism divides them across GPUs.
+        </p>
+        <nav class="study-links" aria-label="Jump to a section">
+          <a href="#computation">Computation diagram</a>
+          <a href="#anatomy">Model overview</a>
+          <a href="#components">Architecture components</a>
+          <a href="#parameters">Parameter counts</a>
+          <a href="#cache">Cache scaling</a>
+        </nav>
+
+        <div class="stats" aria-label="Kimi K3 headline specifications">
+          <div class="stat"><strong>2.78T</strong><span>total parameters</span></div>
+          <div class="stat"><strong>104.2B</strong><span>activated parameters</span></div>
+          <div class="stat"><strong>93</strong><span>decoder layers</span></div>
+          <div class="stat"><strong>69 + 24</strong><span>KDA + Gated MLA</span></div>
+          <div class="stat"><strong>16 / 896</strong><span>routed experts active</span></div>
+          <div class="stat"><strong>1M</strong><span>maximum context</span></div>
+        </div>
+      </header>
+
+      <main>
+        <section id="anatomy">
+          <h2>The model at a glance</h2>
+          <p class="section-lede">
+            The decoder repeats a four-layer rhythm: three linear-attention KDA layers, then one global Gated MLA layer. Twenty-three complete groups
+            account for 92 layers; a final MLA layer makes global interaction the last operation in the 93-layer stack.
+          </p>
+
+          <div class="anatomy card">
+            <div class="anatomy-grid">
+              <div class="tower">
+                <span class="label">Native vision input</span>
+                <strong>MoonViT-V2</strong>
+                <div class="mini-stack">
+                  <div class="mini-node">14&times;14 patches<br />images + video</div>
+                  <div class="mini-node">27 layers &middot; width 1024<br />spatial + temporal attention</div>
+                  <div class="mini-node">2&times;2 pixel shuffle<br />MLP projector &rarr; 7168</div>
+                </div>
+              </div>
+              <div class="flow-arrow" aria-hidden="true">&rarr;</div>
+              <div class="backbone">
+                <span class="label">Decoder backbone &middot; width 7168</span>
+                <strong>23 repeated groups, then one final global layer</strong>
+                <div class="block-cycle" aria-label="Repeated attention pattern">
+                  <div class="cycle-cell kda">KDA</div>
+                  <div class="cycle-cell kda">KDA</div>
+                  <div class="cycle-cell kda">KDA</div>
+                  <div class="cycle-cell mla">Gated MLA</div>
+                </div>
+                <div class="moe-ribbon">Layer 1 uses a dense FFN; layers 2-93 use Stable LatentMoE &middot; 896 choose 16 + 2 shared</div>
+                <div class="residual-rail">
+                  Block Attention Residuals retrieve from the embedding, completed block sums, and the current partial block
+                </div>
+              </div>
+              <div class="flow-arrow" aria-hidden="true">&rarr;</div>
+              <div class="head">
+                <span class="label">Output</span>
+                <strong>Final AttnRes</strong>
+                <div class="mini-stack">
+                  <div class="mini-node">RMSNorm</div>
+                  <div class="mini-node">163,840-way LM head</div>
+                </div>
+              </div>
+            </div>
+
+            <div class="legend" aria-label="Layer legend">
+              <span style="--legend-color: var(--kda)">KDA layer</span>
+              <span style="--legend-color: var(--mla)">Gated MLA layer</span>
+              <span style="--legend-color: var(--gold)">dense FFN outline</span>
+            </div>
+            <div class="layer-map" id="layer-map" aria-label="Interactive map of all 93 layers"></div>
+            <div class="layer-readout" id="layer-readout" aria-live="polite">
+              <strong>Layer 1</strong>
+              <span>KDA + the model's only dense FFN; all later layers use Stable LatentMoE.</span>
+            </div>
+          </div>
+
+          <div class="reading-notes">
+            <article class="reading-note" style="--accent: var(--kda)">
+              <h3>Most layers do not build a KV cache</h3>
+              <p>KDA carries history in a fixed-size recurrent state. Only 24 Gated MLA layers retain token-growing global KV state.</p>
+            </article>
+            <article class="reading-note" style="--accent: var(--residual)">
+              <h3>Depth has an attention mechanism too</h3>
+              <p>Block AttnRes replaces uniform residual accumulation with learned mixing over eight layer-block summaries plus the embedding.</p>
+            </article>
+            <article class="reading-note" style="--accent: var(--moe)">
+              <h3>Almost all weights are dormant per token</h3>
+              <p>The routed expert bank holds 97.94% of the parameters, while each token selects only 16 of 896 experts.</p>
+            </article>
+            <article class="reading-note" style="--accent: var(--vision)">
+              <h3>Vision is native, not attached afterward</h3>
+              <p>
+                MoonViT-V2 is trained from scratch under the same next-token objective, and projected visual tokens enter the shared decoder stream.
+              </p>
+            </article>
+          </div>
+        </section>
+
+        <section id="computation">
+          <h2>Follow the kernels, one layer at a time</h2>
+          <p class="section-lede">
+            The heavy-bordered boxes are matrix multiplies or attention kernels. Choose a representative layer, then click an operation to see its
+            weights, output tensor, and backward dependencies.
+          </p>
+          <div class="kernel-controls card">
+            <label
+              >Layer
+              <select id="kernel-layer">
+                <option value="kda-moe">Layer 2: KDA + LatentMoE</option>
+                <option value="mla-moe">Layer 4: Gated MLA + LatentMoE</option>
+                <option value="kda-dense">Layer 1: KDA + dense FFN</option>
+              </select>
+            </label>
+            <label
+              >Labels
+              <select id="kernel-lens">
+                <option value="shapes">Tensor shapes</option>
+                <option value="params">Weight parameters</option>
+              </select>
+            </label>
+            <label
+              >Backward storage
+              <select id="kernel-storage">
+                <option value="autograd">Without checkpointing</option>
+                <option value="checkpoint">Full layer checkpoint</option>
+              </select>
+            </label>
+            <label
+              >Packed tokens T
+              <select id="kernel-tokens">
+                <option value="1024">1,024</option>
+                <option value="4096" selected>4,096</option>
+                <option value="8192">8,192</option>
+                <option value="16384">16,384</option>
+              </select>
+            </label>
+            <label
+              >Activation dtype
+              <select id="kernel-dtype">
+                <option value="2">BF16</option>
+                <option value="4">FP32</option>
+              </select>
+            </label>
+          </div>
+          <div class="kernel-legend">
+            <span><i class="kernel-key gemm"></i> GEMM / attention</span>
+            <span><i class="kernel-key op"></i> Norm / elementwise / layout</span>
+            <span><i class="kernel-key comm"></i> Expert dispatch / combine</span>
+            <span><i class="kernel-key save"></i> Backward needs this output</span>
+          </div>
+          <p class="note">
+            T is the number of packed tokens in this logical invocation. Several documents can occupy those tokens; cumulative sequence offsets
+            preserve their boundaries. R = 16T counts token-expert assignments across the whole expert group. A GPU receives only its share of R.
+          </p>
+          <div class="kernel-layout">
+            <div class="kernel-diagram card" id="kernel-diagram"></div>
+            <aside class="kernel-inspector card" id="kernel-inspector" aria-live="polite"></aside>
+          </div>
+          <p class="note" id="kernel-memory-note"></p>
+          <noscript
+            ><p>Enable JavaScript to explore the kernel diagram. The component descriptions below include the same model dimensions.</p></noscript
+          >
+        </section>
+
+        <section id="components">
+          <h2>One layer, five views</h2>
+          <p class="section-lede">Select a component to follow its actual data path. Dimensions below use the released Kimi K3 configuration.</p>
+          <div class="tabs" role="tablist" aria-label="Architecture component">
+            <button class="tab" role="tab" aria-selected="true" data-tab="kda">KDA</button>
+            <button class="tab" role="tab" aria-selected="false" data-tab="mla">Gated MLA</button>
+            <button class="tab" role="tab" aria-selected="false" data-tab="moe">Stable LatentMoE</button>
+            <button class="tab" role="tab" aria-selected="false" data-tab="attnres">Attention Residuals</button>
+            <button class="tab" role="tab" aria-selected="false" data-tab="vision">MoonViT-V2</button>
+          </div>
+
+          <div class="card">
+            <article
+              class="component-panel active"
+              data-panel="kda"
+              data-print-title="Kimi Delta Attention"
+              style="--accent: var(--kda); --accent-soft: var(--kda-soft)"
+            >
+              <div class="component-intro">
+                <div>
+                  <h3>Kimi Delta Attention: fixed-state sequence mixing</h3>
+                  <p>
+                    KDA applies channel-wise forgetting before a delta-rule write. Query, key, and value each pass through a width-4 depthwise causal
+                    convolution and Swish; query and key are L2-normalized. A low-rank branch creates one retention value for every head and key
+                    channel.
+                  </p>
+                  <div class="equation">
+                    S<sub>t</sub> = (I - &beta;<sub>t</sub>k<sub>t</sub>k<sub>t</sub><sup>T</sup>) Diag(&alpha;<sub>t</sub>) S<sub>t-1</sub> +
+                    &beta;<sub>t</sub>k<sub>t</sub>v<sub>t</sub><sup>T</sup>
+                  </div>
+                </div>
+                <ul class="fact-list">
+                  <li><span>Layers</span><strong>69</strong></li>
+                  <li><span>Heads</span><strong>96</strong></li>
+                  <li><span>Head / state shape</span><strong>128 / 128&times;128</strong></li>
+                  <li><span>Convolution width</span><strong>4</strong></li>
+                  <li>
+                    <span>Log-decay bound</span><strong>g<sub>min</sub> = -5</strong>
+                  </li>
+                  <li><span>Parameters per KDA</span><strong>443.74M</strong></li>
+                </ul>
+              </div>
+              <div class="branch-grid">
+                <div class="branch"><strong>q, k, v</strong><span>7168 &rarr; 96&times;128, ShortConv, Swish; q and k then L2Norm</span></div>
+                <div class="branch">
+                  <strong>&alpha; retention</strong><span>7168 &rarr; 128 &rarr; 96&times;128; scaled sigmoid bounds log-decay to (-5, 0)</span>
+                </div>
+                <div class="branch"><strong>&beta; write strength</strong><span>7168 &rarr; 96, followed by sigmoid</span></div>
+              </div>
+              <div class="flow">
+                <div class="flow-node"><strong>Chunk input</strong><small>T &times; 7168</small></div>
+                <div class="flow-arrow">&rarr;</div>
+                <div class="flow-node"><strong>Parallel tiles</strong><small>dense Tensor Core math inside a chunk</small></div>
+                <div class="flow-arrow">&rarr;</div>
+                <div class="flow-node accent">
+                  <strong>Recurrent state</strong><small>96 &times; 128 &times; 128, fixed with context length</small>
+                </div>
+                <div class="flow-arrow">&rarr;</div>
+                <div class="flow-node"><strong>Head RMSNorm + gate</strong><small>full-rank 7168 &rarr; 12288 gate</small></div>
+                <div class="flow-arrow">&rarr;</div>
+                <div class="flow-node"><strong>Output projection</strong><small>12288 &rarr; 7168</small></div>
+              </div>
+              <p class="note">
+                The lower-bounded decay keeps a 16-token tile's reciprocal cumulative decay below e<sup>80</sup>, within BF16 range. That lets
+                diagonal as well as off-diagonal tiles use dense Tensor Core matrix multiplies.
+              </p>
+            </article>
+
+            <article
+              class="component-panel"
+              data-panel="mla"
+              data-print-title="Gated MLA"
+              style="--accent: var(--mla); --accent-soft: var(--mla-soft)"
+            >
+              <div class="component-intro">
+                <div>
+                  <h3>Gated MLA: periodic global interaction</h3>
+                  <p>
+                    Every fourth layer performs unrestricted global attention, and layer 93 adds one final global pass. Keys and values are
+                    reconstructed from a 512-wide latent. K3 uses NoPE: the extra shared 64-wide key slice is retained, but no rotary transform is
+                    applied.
+                  </p>
+                  <div class="equation">
+                    y<sub>t</sub> = W<sub>o</sub>[Sigmoid(W<sub>g</sub>x<sub>t</sub>) &odot; attention(q<sub>t</sub>, k<sub>&le;t</sub>,
+                    v<sub>&le;t</sub>)]
+                  </div>
+                </div>
+                <ul class="fact-list">
+                  <li><span>Layers</span><strong>24</strong></li>
+                  <li><span>Query heads</span><strong>96</strong></li>
+                  <li><span>Query rank</span><strong>1536</strong></li>
+                  <li><span>KV latent</span><strong>512</strong></li>
+                  <li><span>q/k and v per head</span><strong>192 and 128</strong></li>
+                  <li><span>Parameters per MLA</span><strong>232.20M</strong></li>
+                </ul>
+              </div>
+              <div class="branch-grid">
+                <div class="branch"><strong>Query branch</strong><span>7168 &rarr; 1536 &rarr; 96&times;192</span></div>
+                <div class="branch">
+                  <strong>KV branch</strong><span>7168 &rarr; 512 latent + 64 shared key; latent &rarr; 96&times;(128 key + 128 value)</span>
+                </div>
+                <div class="branch">
+                  <strong>Output gate</strong><span>7168 &rarr; 96&times;128; sigmoid modulation before W<sub>o</sub></span>
+                </div>
+              </div>
+              <div class="flow">
+                <div class="flow-node"><strong>x</strong><small>T &times; 7168</small></div>
+                <div class="flow-arrow">&rarr;</div>
+                <div class="flow-node"><strong>Low-rank Q / KV</strong><small>1536 query latent; 512 KV latent</small></div>
+                <div class="flow-arrow">&rarr;</div>
+                <div class="flow-node accent"><strong>Global attention</strong><small>96 heads; causal; NoPE</small></div>
+                <div class="flow-arrow">&rarr;</div>
+                <div class="flow-node"><strong>FP32 output tile</strong><small>paper's training-kernel correction for rounding bias</small></div>
+                <div class="flow-arrow">&rarr;</div>
+                <div class="flow-node">
+                  <strong>Gate + W<sub>o</sub></strong
+                  ><small>96&times;128 &rarr; 7168</small>
+                </div>
+              </div>
+            </article>
+
+            <article
+              class="component-panel"
+              data-panel="moe"
+              data-print-title="Stable LatentMoE"
+              style="--accent: var(--moe); --accent-soft: var(--moe-soft)"
+            >
+              <div class="component-intro">
+                <div>
+                  <h3>Stable LatentMoE: extreme width behind a narrow waist</h3>
+                  <p>
+                    The shared path stays at model width. The routed path first compresses 7168 channels to 3584, selects 16 experts from 896,
+                    normalizes their aggregate, then projects back to 7168. This halves the width carried through expert dispatch and expert matrices.
+                  </p>
+                  <div class="equation">
+                    u = &Sigma;<sub>i&isin;Top16(x)</sub> p<sub>i</sub>E<sub>i</sub>(W<sub>down</sub>x), &nbsp; y = &Sigma;E<sub>shared</sub>(x) +
+                    W<sub>up</sub>RMSNorm(u)
+                  </div>
+                </div>
+                <ul class="fact-list">
+                  <li><span>Routed experts</span><strong>896</strong></li>
+                  <li><span>Active per token</span><strong>16 (1/56)</strong></li>
+                  <li><span>Latent width</span><strong>3584</strong></li>
+                  <li><span>Expert hidden width</span><strong>3072</strong></li>
+                  <li><span>Shared experts</span><strong>2 at width 7168</strong></li>
+                  <li><span>Expert bank per layer</span><strong>29.595B</strong></li>
+                </ul>
+              </div>
+              <div class="branch-grid">
+                <div class="branch">
+                  <strong>Router + Quantile Balancing</strong
+                  ><span>Sigmoid scores, bias-adjusted Top-16 selection, then normalization using the original unbiased scores</span>
+                </div>
+                <div class="branch">
+                  <strong>896 routed experts</strong
+                  ><span>Each expert has three matrices and 33.03M parameters; SiTU-GLU caps both multiplicative branches</span>
+                </div>
+                <div class="branch">
+                  <strong>2 shared experts</strong
+                  ><span>Full-width 7168 &rarr; 3072 paths run for every token and capture common transformations</span>
+                </div>
+              </div>
+              <div class="flow">
+                <div class="flow-node"><strong>x</strong><small>T &times; 7168</small></div>
+                <div class="flow-arrow">&rarr;</div>
+                <div class="flow-node">
+                  <strong>W<sub>down</sub></strong
+                  ><small>7168 &rarr; 3584</small>
+                </div>
+                <div class="flow-arrow">&rarr;</div>
+                <div class="flow-node accent"><strong>Dispatch Top-16</strong><small>896 experts &middot; SiTU-GLU</small></div>
+                <div class="flow-arrow">&rarr;</div>
+                <div class="flow-node"><strong>Weighted sum + RMSNorm</strong><small>stabilizes routed scale</small></div>
+                <div class="flow-arrow">&rarr;</div>
+                <div class="flow-node">
+                  <strong>W<sub>up</sub> + shared path</strong><small>3584 &rarr; 7168</small>
+                </div>
+              </div>
+              <p class="note">
+                Quantile Balancing estimates each expert's target quantile from globally reduced histograms. Its bias changes assignment only; the
+                mixture weights and router gradients use the original scores. The bias update takes effect on the next step.
+              </p>
+            </article>
+
+            <article
+              class="component-panel"
+              data-panel="attnres"
+              data-print-title="Attention Residuals"
+              style="--accent: var(--residual); --accent-soft: var(--residual-soft)"
+            >
+              <div class="component-intro">
+                <div>
+                  <h3>Block AttnRes: retrieval over depth</h3>
+                  <p>
+                    Instead of forcing all prior computation through one accumulated residual stream, each sublayer forms a learned softmax mixture of
+                    the embedding, completed 12-layer block sums, and the current block's partial sum.
+                  </p>
+                  <div class="equation">
+                    h<sub>l</sub> = &Sigma;<sub>i</sub> softmax(w<sub>l</sub><sup>T</sup> RMSNorm(b<sub>i</sub>)) &middot; b<sub>i</sub>
+                  </div>
+                </div>
+                <ul class="fact-list">
+                  <li><span>Layer blocks</span><strong>8</strong></li>
+                  <li><span>Nominal block size</span><strong>12 layers</strong></li>
+                  <li><span>Final block</span><strong>9 layers</strong></li>
+                  <li><span>Sources incl. embedding</span><strong>up to 9</strong></li>
+                  <li><span>Storage scaling</span><strong>O(blocks &times; width)</strong></li>
+                  <li><span>Learned parameters</span><strong>2.67M</strong></li>
+                </ul>
+              </div>
+              <div class="flow">
+                <div class="flow-node">
+                  <strong>Embedding b<sub>0</sub></strong
+                  ><small>always retained as a source</small>
+                </div>
+                <div class="flow-arrow">+</div>
+                <div class="flow-node">
+                  <strong>Completed blocks</strong><small>b<sub>1</sub> ... b<sub>n-1</sub></small>
+                </div>
+                <div class="flow-arrow">+</div>
+                <div class="flow-node"><strong>Current partial sum</strong><small>for later layers in a block</small></div>
+                <div class="flow-arrow">&rarr;</div>
+                <div class="flow-node accent"><strong>RMSNorm keys + pseudo-query</strong><small>one scalar score per source</small></div>
+                <div class="flow-arrow">&rarr;</div>
+                <div class="flow-node"><strong>Softmax mixture</strong><small>input to attention or FFN</small></div>
+              </div>
+              <p class="note">
+                Full AttnRes would retain every layer output. Block AttnRes reduces the memory and pipeline-communication term from O(layers &times;
+                width) to O(blocks &times; width), while preserving learned access to distant depth.
+              </p>
+            </article>
+
+            <article
+              class="component-panel"
+              data-panel="vision"
+              data-print-title="MoonViT-V2"
+              style="--accent: var(--vision); --accent-soft: var(--vision-soft)"
+            >
+              <div class="component-intro">
+                <div>
+                  <h3>MoonViT-V2: native visual tokens</h3>
+                  <p>
+                    The 401M-parameter vision tower is trained from scratch with next-token prediction. Images and videos share its parameters;
+                    spatial and temporal attention are factorized, then a 2&times;2 pixel shuffle cuts the visual token count by four before
+                    projection into the language width.
+                  </p>
+                </div>
+                <ul class="fact-list">
+                  <li><span>Vision layers</span><strong>27</strong></li>
+                  <li><span>Vision width</span><strong>1024</strong></li>
+                  <li><span>Attention heads</span><strong>12</strong></li>
+                  <li><span>Patch size</span><strong>14</strong></li>
+                  <li><span>Vision tower</span><strong>401.2M</strong></li>
+                  <li><span>Tower + projector</span><strong>447.4M</strong></li>
+                </ul>
+              </div>
+              <div class="flow">
+                <div class="flow-node"><strong>Image / video</strong><small>up to 3584&times;3584 images</small></div>
+                <div class="flow-arrow">&rarr;</div>
+                <div class="flow-node"><strong>Patch embed</strong><small>14&times;14 patches, width 1024</small></div>
+                <div class="flow-arrow">&rarr;</div>
+                <div class="flow-node accent"><strong>MoonViT-V2</strong><small>27 bias-free transformer layers</small></div>
+                <div class="flow-arrow">&rarr;</div>
+                <div class="flow-node"><strong>2&times;2 pixel shuffle</strong><small>4&times; fewer tokens, 4096 channels</small></div>
+                <div class="flow-arrow">&rarr;</div>
+                <div class="flow-node"><strong>MLP projector</strong><small>4096 &rarr; 7168</small></div>
+              </div>
+            </article>
+          </div>
+        </section>
+
+        <section id="parameters">
+          <h2>Where 2.78 trillion parameters live</h2>
+          <p class="section-lede">
+            The routed expert matrices dominate the checkpoint. Toggle the accounting lens to see why the model can activate about 104.2B parameters
+            while storing 2.78T.
+          </p>
+          <div class="param-controls">
+            <div class="segmented" role="group" aria-label="Parameter accounting mode">
+              <button class="active" type="button" data-param-mode="total">Stored</button>
+              <button type="button" data-param-mode="active">Active / text token</button>
+            </div>
+            <div class="param-total" id="param-total">2.780T</div>
+          </div>
+          <div class="param-bar" id="param-bar" aria-label="Parameter composition"></div>
+          <div class="param-detail-grid" id="param-details"></div>
+          <div class="derivation" id="param-derivation">
+            <strong>Stored:</strong> 92 layers &times; 896 experts &times; 3 matrices &times; 3584 &times; 3072 = 2.7227T routed-expert parameters, or
+            97.94% of the model.
+          </div>
+        </section>
+
+        <section id="cache">
+          <h2>Why hybrid attention changes long-context memory</h2>
+          <p class="section-lede">
+            KDA state is constant with sequence length; MLA cache grows one compressed entry per token. The calculator is structural rather than a
+            serving-memory promise: it omits allocator overhead, convolution history, quantization metadata, and tensor-parallel sharding.
+          </p>
+          <div class="cache-tool card">
+            <div class="controls">
+              <label>
+                <strong>Context: <span id="context-label">1,048,576</span> tokens</strong>
+                <input id="context-slider" type="range" min="0" max="3" step="1" value="3" />
+              </label>
+              <label>
+                <strong>MLA cache element</strong>
+                <select id="mla-bytes">
+                  <option value="2" selected>BF16 / FP16 (2 bytes)</option>
+                  <option value="1">FP8 (1 byte)</option>
+                  <option value="4">FP32 (4 bytes)</option>
+                </select>
+              </label>
+              <label>
+                <strong>KDA state element</strong>
+                <select id="kda-bytes">
+                  <option value="4" selected>FP32 (4 bytes)</option>
+                  <option value="2">BF16 / FP16 (2 bytes)</option>
+                </select>
+              </label>
+            </div>
+            <div class="cache-bars">
+              <div class="cache-row">
+                <span>24 MLA caches</span>
+                <div class="track"><div class="fill" id="mla-fill" style="background: var(--mla)"></div></div>
+                <span class="cache-value" id="mla-value"></span>
+              </div>
+              <div class="cache-row">
+                <span>69 KDA states</span>
+                <div class="track"><div class="fill" id="kda-fill" style="background: var(--kda)"></div></div>
+                <span class="cache-value" id="kda-value"></span>
+              </div>
+              <div class="cache-row">
+                <span>K3 hybrid total</span>
+                <div class="track"><div class="fill" id="hybrid-fill" style="background: var(--gold)"></div></div>
+                <span class="cache-value" id="hybrid-value"></span>
+              </div>
+              <div class="cache-row">
+                <span>93-layer MLA baseline</span>
+                <div class="track"><div class="fill" id="baseline-fill" style="background: var(--line-strong)"></div></div>
+                <span class="cache-value" id="baseline-value"></span>
+              </div>
+              <p class="formula mono">
+                MLA = N &times; 24 &times; (512 latent + 64 shared-key) &times; bytes; KDA = 69 &times; 96 &times; 128 &times; 128 &times; state
+                bytes.
+              </p>
+            </div>
+          </div>
+        </section>
+
+        <section id="training">
+          <h2>Training the 3T-class model</h2>
+          <p class="section-lede">
+            The report's system is as architectural as the network itself. It combines parallel dimensions, balanced expert placement, and
+            tensor-granular activation storage policies to keep useful work on the critical path.
+          </p>
+          <div class="system-flow card" aria-label="MoonEP dispatch flow">
+            <div class="system-step"><strong>Router output</strong><br />current layer and microbatch</div>
+            <div class="system-step"><strong>Online plan</strong><br />place bounded redundant experts</div>
+            <div class="system-step"><strong>Zero-copy dispatch</strong><br />write directly into expert order</div>
+            <div class="system-step"><strong>Static expert work</strong><br />exactly S&times;K tokens per rank</div>
+            <div class="system-step"><strong>Combine + reduce</strong><br />return redundant gradients home</div>
+          </div>
+          <div class="infra-grid">
+            <article class="infra-card card" style="--accent: var(--moe)">
+              <h3>MoonEP: balance first</h3>
+              <p>
+                Dynamic redundant experts guarantee a perfectly balanced plan with at most E/R redundant experts per rank. Static shapes remove
+                per-layer host synchronization; fused permutation writes directly into the remote expert-grouped layout.
+              </p>
+            </article>
+            <article class="infra-card card" style="--accent: var(--kda)">
+              <h3>KDA Context Parallelism</h3>
+              <p>
+                Each rank computes a local transition and a zero-initialized state. Because these summaries compose associatively, an all-gather plus
+                prefix scan reconstructs every rank's incoming state with communication independent of sequence length.
+              </p>
+            </article>
+            <article class="infra-card card" style="--accent: var(--residual)">
+              <h3>One activation abstraction</h3>
+              <p>
+                Recompute, block-wise FP8 quantization, local offload, and remote offload become pluggable storage policies. AttnRes is checkpointed,
+                and dispatch is recomputed during MoE backward instead of retained.
+              </p>
+            </article>
+            <article class="infra-card card" style="--accent: var(--vision)">
+              <h3>Use pipeline bubbles</h3>
+              <p>
+                Training combines PP with virtual stages, EP, ZeRO-1, Pipeline ZeRO-2, and CP. Dynamic vision CP balances large images, while most
+                vision forward and backward work is scheduled into pipeline bubbles.
+              </p>
+            </article>
+          </div>
+          <div class="callout">
+            <strong>Paper system versus TorchTitan:</strong> MoonEP is the system described in the Kimi K3 report. TorchTitan's current K3 path
+            implements the model and offers its own FSDP/EP dispatch choices, including HybridEP; that is not a reproduction of MoonEP's
+            redundant-expert planner, Pipeline ZeRO-2, or the report's complete PP/VP/CP schedule.
+          </div>
+        </section>
+
+        <section class="sources" id="sources">
+          <h2>Sources and counting notes</h2>
+          <ol>
+            <li>
+              <a href="https://github.com/MoonshotAI/Kimi-K3/blob/main/k3_tech_report.pdf">Kimi K3 Technical Report</a>: architecture, equations,
+              training recipe, MoonEP, long-context systems, and reported headline counts.
+            </li>
+            <li>
+              <a href="https://huggingface.co/moonshotai/Kimi-K3">Kimi K3 model card</a> and
+              <a href="https://huggingface.co/moonshotai/Kimi-K3/blob/main/config.json">released configuration</a>: layer indices, dimensions,
+              quantization metadata, and tokenizer IDs.
+            </li>
+            <li>
+              <a href="https://github.com/pytorch/torchtitan/tree/main/torchtitan/models/kimi_k3">TorchTitan Kimi K3 implementation</a>: tensor shapes
+              and structural parameter count.
+            </li>
+            <li>
+              Diagram presentation inspired by
+              <a href="https://deepseek-v3.ezyang.com/studies/01-deepseek-diagram.html">Edward Yang's DeepSeek architecture diagram</a>. The Kimi K3
+              computation graph and dimensions are specific to this model.
+            </li>
+          </ol>
+          <p>
+            The exact structural count shown here is 2,779,931,738,208 parameters from the TorchTitan module shapes. The routed bank contributes
+            2,722,740,830,208. The 104,189,515,872 active-text-parameter reconstruction counts 16/896 of that bank, all non-routed text-path weights,
+            and the output head; it excludes the input embedding lookup and vision pathway. The released checkpoint uses MXFP4 for routed expert
+            weights and MXFP8 input activations during quantization-aware post-training; parameter counts remain logical counts, not stored bytes.
+          </p>
+          <p>
+            The report also describes one MTP layer later fine-tuned into an EAGLE-3-style draft model. The released backbone configuration sets
+            <code>num_nextn_predict_layers=0</code>, so that draft is not included in the 2.78T tally above.
+          </p>
+        </section>
+      </main>
+    </div>
+
+    <script>
+      (() => {
+        const root = document.documentElement;
+        const themeButton = document.getElementById("theme-toggle");
+        let savedTheme;
+        try {
+          savedTheme = localStorage.getItem("kimi-k3-study-theme");
+        } catch {}
+        const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+        if (savedTheme === "dark" || (!savedTheme && prefersDark)) root.classList.add("dark");
+
+        const updateThemeLabel = () => {
+          themeButton.textContent = root.classList.contains("dark") ? "Light" : "Dark";
+        };
+        updateThemeLabel();
+        themeButton.addEventListener("click", () => {
+          root.classList.toggle("dark");
+          try {
+            localStorage.setItem("kimi-k3-study-theme", root.classList.contains("dark") ? "dark" : "light");
+          } catch {}
+          updateThemeLabel();
+        });
+
+        const layerMap = document.getElementById("layer-map");
+        const layerReadout = document.getElementById("layer-readout");
+        let selectedLayer = 1;
+        for (let block = 0; block < 8; block += 1) {
+          const start = block * 12 + 1;
+          const end = Math.min(start + 11, 93);
+          const group = document.createElement("div");
+          group.className = "layer-group";
+          group.innerHTML = `<div class="layer-group-label"><span>AttnRes block ${block + 1}</span><span>L${start}-${end}</span></div>`;
+          const tiles = document.createElement("div");
+          tiles.className = "layer-tiles";
+          for (let layer = start; layer <= end; layer += 1) {
+            const isMla = layer % 4 === 0 || layer === 93;
+            const button = document.createElement("button");
+            button.type = "button";
+            button.className = `layer-tile ${isMla ? "mla" : "kda"}${layer === 1 ? " dense" : ""}${layer === selectedLayer ? " selected" : ""}`;
+            button.textContent = layer;
+            button.title = `Layer ${layer}: ${isMla ? "Gated MLA" : "KDA"} + ${layer === 1 ? "dense FFN" : "Stable LatentMoE"}`;
+            button.addEventListener("click", () => {
+              selectedLayer = layer;
+              document.querySelectorAll(".layer-tile").forEach((tile) => tile.classList.remove("selected"));
+              button.classList.add("selected");
+              layerReadout.innerHTML = `<strong>Layer ${layer}</strong><span>${
+                isMla
+                  ? "Gated MLA: unrestricted global attention, compressed KV, NoPE, and a full-rank output gate."
+                  : "KDA: width-4 short convolution, lower-bounded channel decay, delta-rule state, and a full-rank output gate."
+              } ${
+                layer === 1 ? "This is the only dense FFN layer." : "Its channel mixer is Stable LatentMoE (896 choose 16, plus two shared experts)."
+              }</span>`;
+            });
+            tiles.appendChild(button);
+          }
+          group.appendChild(tiles);
+          layerMap.appendChild(group);
+        }
+
+        const tabs = [...document.querySelectorAll("[data-tab]")];
+        const panels = [...document.querySelectorAll("[data-panel]")];
+        tabs.forEach((tab) =>
+          tab.addEventListener("click", () => {
+            tabs.forEach((candidate) => candidate.setAttribute("aria-selected", String(candidate === tab)));
+            panels.forEach((panel) => panel.classList.toggle("active", panel.dataset.panel === tab.dataset.tab));
+          })
+        );
+
+        const params = [
+          { name: "Routed expert bank", total: 2722740830208, active: 48620371968, color: "#7652b8" },
+          { name: "KDA", total: 30618086496, active: 30618086496, color: "#0d887d" },
+          { name: "Shared experts", total: 12155092992, active: 12155092992, color: "#9b72d0" },
+          { name: "Gated MLA", total: 5572706304, active: 5572706304, color: "#d46b2c" },
+          { name: "Latent projections + norms", total: 4727310336, active: 4727310336, color: "#a78b69" },
+          { name: "Input embedding", total: 1174405120, active: 0, color: "#718096" },
+          { name: "LM head", total: 1174405120, active: 1174405120, color: "#a87816" },
+          { name: "Dense FFN", total: 726663168, active: 726663168, color: "#568f54" },
+          { name: "Router", total: 590872576, active: 590872576, color: "#ba68a0" },
+          { name: "Vision + projector", total: 447358976, active: 0, color: "#3974ad" },
+          { name: "AttnRes", total: 2666496, active: 2666496, color: "#b84d6d" },
+          { name: "Norms", total: 1340416, active: 1340416, color: "#77776f" },
+        ];
+        const formatParams = (value) => {
+          if (value >= 1e12) return `${(value / 1e12).toFixed(3)}T`;
+          if (value >= 1e9) return `${(value / 1e9).toFixed(3)}B`;
+          return `${(value / 1e6).toFixed(2)}M`;
+        };
+        const paramBar = document.getElementById("param-bar");
+        const paramDetails = document.getElementById("param-details");
+        const paramTotal = document.getElementById("param-total");
+        const derivation = document.getElementById("param-derivation");
+        const renderParams = (mode) => {
+          const total = params.reduce((sum, item) => sum + item[mode], 0);
+          paramTotal.textContent = formatParams(total);
+          paramBar.replaceChildren();
+          paramDetails.replaceChildren();
+          params
+            .filter((item) => item[mode] > 0)
+            .forEach((item) => {
+              const segment = document.createElement("div");
+              segment.className = "param-segment";
+              segment.style.flexGrow = item[mode] / total;
+              segment.style.background = item.color;
+              segment.title = `${item.name}: ${formatParams(item[mode])} (${((100 * item[mode]) / total).toFixed(2)}%)`;
+              paramBar.appendChild(segment);
+
+              const row = document.createElement("div");
+              row.className = "param-row";
+              row.innerHTML = `<span class="swatch" style="background:${item.color}"></span><span>${
+                item.name
+              }</span><span class="value">${formatParams(item[mode])}</span>`;
+              paramDetails.appendChild(row);
+            });
+          derivation.innerHTML =
+            mode === "total"
+              ? "<strong>Stored:</strong> 92 layers &times; 896 experts &times; 3 matrices &times; 3584 &times; 3072 = 2.7227T routed-expert parameters, or 97.94% of the model."
+              : "<strong>Active:</strong> (2.7227T &times; 16 / 896) + 55.569B always-active text-path weights = 104.190B. The convention excludes the input embedding lookup and vision tower, and includes the output head.";
+        };
+        document.querySelectorAll("[data-param-mode]").forEach((button) =>
+          button.addEventListener("click", () => {
+            document.querySelectorAll("[data-param-mode]").forEach((candidate) => candidate.classList.toggle("active", candidate === button));
+            renderParams(button.dataset.paramMode);
+          })
+        );
+        renderParams("total");
+
+        const contexts = [8192, 65536, 262144, 1048576];
+        const slider = document.getElementById("context-slider");
+        const mlaBytes = document.getElementById("mla-bytes");
+        const kdaBytes = document.getElementById("kda-bytes");
+        const formatBytes = (bytes) => {
+          if (bytes >= 2 ** 30) return `${(bytes / 2 ** 30).toFixed(1)} GiB`;
+          return `${(bytes / 2 ** 20).toFixed(0)} MiB`;
+        };
+        const renderCache = () => {
+          const tokens = contexts[Number(slider.value)];
+          const mla = tokens * 24 * (512 + 64) * Number(mlaBytes.value);
+          const kda = 69 * 96 * 128 * 128 * Number(kdaBytes.value);
+          const hybrid = mla + kda;
+          const baseline = tokens * 93 * (512 + 64) * Number(mlaBytes.value);
+          document.getElementById("context-label").textContent = tokens.toLocaleString();
+          const rows = [
+            ["mla", mla],
+            ["kda", kda],
+            ["hybrid", hybrid],
+            ["baseline", baseline],
+          ];
+          rows.forEach(([id, value]) => {
+            document.getElementById(`${id}-fill`).style.width = `${Math.max(0.6, (100 * value) / baseline)}%`;
+            document.getElementById(`${id}-value`).textContent = formatBytes(value);
+          });
+        };
+        [slider, mlaBytes, kdaBytes].forEach((control) => control.addEventListener("input", renderCache));
+        renderCache();
+      })();
+    </script>
+  </body>
+</html>
