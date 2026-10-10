@@ -11,6 +11,7 @@
     <title>Memory: Kimi K3 on 512 GB200s</title>
     <link rel="stylesheet" href="./kimi-k3-memory.css" />
     <link rel="stylesheet" href="./kimi-k3-series.css" />
+    <script src="./kimi-k3-accounting.js" defer></script>
     <script src="./kimi-k3-memory.js" defer></script>
   </head>
   <body>
@@ -19,6 +20,7 @@
         <span class="series-title">Kimi K3 studies</span>
         <a href="./kimi-k3.html">01 / Architecture</a>
         <a href="./kimi-k3-memory.html" aria-current="page">02 / Memory</a>
+        <a href="./kimi-k3-roofline.html">03 / Roofline</a>
         <div class="series-actions">
           <button id="theme-toggle" type="button">Dark</button>
         </div>
@@ -361,6 +363,12 @@ At PP8 / EP64 / FSDP64: expert_FSDP = 1</pre
           master or momentum state for the other virtual stage. The default here is ordinary 1F1B with one stage per PP rank, not an interleaved or
           DualPipe schedule.
         </aside>
+        <p class="note">
+          The whole-stage BF16 bar is a residency budget, not a count of all-gather calls. In the reference trace, an interior 12-layer stage made 780
+          dense parameter all-gathers over one update: 65 per layer. Also, ordinary 1F1B sends the hidden stream <em>and</em> the accumulated AttnRes
+          block stack; a rank's residual cache helps later virtual stages, but cannot shrink that first visit's packet. Study 03 turns these lifetimes
+          and shapes into a <a href="./kimi-k3-roofline.html#communication">communication roofline</a>.
+        </p>
       </section>
 
       <section id="fitdeck">
@@ -485,8 +493,9 @@ At PP8 / EP64 / FSDP64: expert_FSDP = 1</pre
           model omits kernel-specific state and may include candidates an implementation aliases or recomputes. No internal run links, data paths, or
           cluster identifiers are included.
         </p>
-        <nav class="series-footer" aria-label="Previous Kimi K3 study">
+        <nav class="series-footer" aria-label="Adjacent Kimi K3 studies">
           <a href="./kimi-k3.html">&#8592; Previous: Study 01 &mdash; Architecture</a>
+          <a href="./kimi-k3-roofline.html">Next: Study 03 &mdash; Roofline &#8594;</a>
         </nav>
       </section>
     </main>

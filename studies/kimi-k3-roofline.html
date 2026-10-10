@@ -1,0 +1,759 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="robots" content="noindex, follow" />
+    <meta
+      name="description"
+      content="An interactive Kimi K3 training roofline on 512 GB200 GPUs: BF16 GEMMs, KDA and MLA FLOPs, expert routing, HybridEP metadata, FSDP, pipeline bubbles, and DistMuon."
+    />
+    <title>Roofline: Kimi K3 on GB200</title>
+    <link rel="stylesheet" href="./kimi-k3-memory.css" />
+    <link rel="stylesheet" href="./kimi-k3-series.css" />
+    <link rel="stylesheet" href="./kimi-k3-roofline.css" />
+    <script src="./kimi-k3-accounting.js" defer></script>
+    <script src="./kimi-k3-roofline-model.js" defer></script>
+    <script src="./kimi-k3-roofline.js" defer></script>
+  </head>
+  <body>
+    <main class="page">
+      <nav class="series" aria-label="Kimi K3 series">
+        <span class="series-title">Kimi K3 studies</span>
+        <a href="./kimi-k3.html">01 / Architecture</a>
+        <a href="./kimi-k3-memory.html">02 / Memory</a>
+        <a href="./kimi-k3-roofline.html" aria-current="page">03 / Roofline</a>
+        <div class="series-actions"><button id="theme-toggle" type="button">Dark</button><button id="print-page" type="button">Print</button></div>
+      </nav>
+      <header>
+        <div class="eyebrow">Kimi K3 studies / 03</div>
+        <h1>Working the roofline<br />for Kimi K3 on GB200</h1>
+        <p class="dek">We made it fit. Now ask which work, bytes, and dependencies set the pace.</p>
+        <p>
+          <a href="./kimi-k3.html">Study 01</a> followed the tensor shapes. <a href="./kimi-k3-memory.html">Study 02</a> budgeted the live copies.
+          This study turns those shapes into a performance model: first a GEMM roofline, then a distributed communication ledger, then a check against
+          a real training run.
+        </p>
+        <div class="headline-stats">
+          <div><strong>512</strong><span>GB200 GPUs / FP32 master and state</span></div>
+          <div><strong>2,500 TF/s</strong><span>nominal dense BF16 ceiling per GPU</span></div>
+          <div><strong>8 TB/s</strong><span>nominal HBM bandwidth per GPU</span></div>
+          <div><strong>370 tok/s/GPU</strong><span>measured clean 4K reference</span></div>
+        </div>
+        <p class="scope">
+          Default: PP8 / CP1 / TP1 / dense FSDP64 / EP64, FP32 master weights, gradients and Muon momentum, BF16 model GEMMs, full layer
+          checkpointing, one 4K row per microbatch, 64 microbatches, ordinary 1F1B, no CUDA graphs. Hardware ceilings and placement assumptions are
+          not measured kernel or network rates.
+        </p>
+        <nav class="jump-links" aria-label="Sections">
+          <a href="#hardware">Hardware ceilings</a><a href="#lab">Roofline lab</a><a href="#flops">Counting FLOPs</a
+          ><a href="#communication">Counting bytes</a> <a href="#pipeline">Pipeline cost</a><a href="#muon">Muon cost</a
+          ><a href="#reality">Measured reality</a>
+        </nav>
+      </header>
+
+      <section id="hardware">
+        <div class="eyebrow">A ceiling is not a benchmark</div>
+        <h2>Three roofs, three different byte counts</h2>
+        <p>
+          A kernel can be limited by HBM. Distributed work can instead be limited by NVLink or the scale-out network. Divide work by the bandwidth of
+          the resource that actually carries its bytes. In particular, a fast NVLink roof does not make cross-domain traffic disappear.
+        </p>
+        <div class="table-scroll card">
+          <table>
+            <thead>
+              <tr>
+                <th>Resource</th>
+                <th>Default ceiling</th>
+                <th>How to read it</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>BF16 Tensor Cores</td>
+                <td>2,500 TFLOP/s / GPU</td>
+                <td>
+                  NVIDIA lists 360 PFLOP/s for 72 GPUs <em>with sparsity</em>. Dense = 360 / 72 / 2 = 2.5 PFLOP/s. Expert sparsity is not 2:4 weight
+                  sparsity.
+                </td>
+              </tr>
+              <tr>
+                <td>HBM</td>
+                <td>8 TB/s / GPU</td>
+                <td>576 TB/s / 72. This is bandwidth, not the 184.31-GiB capacity reported by the training runtime.</td>
+              </tr>
+              <tr>
+                <td>NVLink</td>
+                <td>900 GB/s / GPU, one direction</td>
+                <td>
+                  Half of the advertised 1.8-TB/s bidirectional endpoint bandwidth. Actual collective bandwidth, contention and power caps can lower
+                  it.
+                </td>
+              </tr>
+              <tr>
+                <td>Scale-out network</td>
+                <td>50 GB/s / GPU, illustrative</td>
+                <td>
+                  A 400-Gbit/s-equivalent, one-direction budget. It is <em>not</em> a claim about this cluster's NIC allocation or measured
+                  throughput. Edit it for the real system.
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="equation-pair">
+          <article class="card">
+            <span class="eyebrow">One GEMM</span><strong class="roof-equation">t &#8805; max(F / P, B / &#946;<sub>HBM</sub>)</strong>
+            <p>F = multiply-add FLOPs; B = modeled operand bytes. Arithmetic intensity I = F / B.</p>
+          </article>
+          <article class="card">
+            <span class="eyebrow">The ridge</span><strong class="roof-equation">I* = P / &#946;<sub>HBM</sub> = 312.5 FLOP/B</strong>
+            <p>Left of the ridge, fewer HBM bytes help. Right of it, the compute ceiling matters. A point under a roof need not attain that roof.</p>
+          </article>
+        </div>
+        <aside class="callout">
+          <strong>Keep precision roles separate.</strong> FP32 master and optimizer state do not turn the model GEMMs into FP32. Likewise, a
+          checkpoint stored in MXFP4 does not make this BF16 training recipe run FP4 GEMMs. Router arithmetic, norms and KDA have additional FP32 and
+          non-matmul work; the optimistic contraction model below does not price all of it.
+        </aside>
+      </section>
+
+      <section id="lab">
+        <div class="eyebrow">Change a shape, watch a roof move</div>
+        <h2>The roofline lab</h2>
+        <p>
+          The lab is an accounting model, not a launch-config generator. Every run has 512 GPUs and TP1. Changing rows or microbatches changes the
+          global batch; changing CP changes the number of independent data replicas. Memory feasibility still needs
+          <a href="./kimi-k3-memory.html#lab">its own budget</a>.
+        </p>
+        <div class="preset-bar" aria-label="Illustrative roofline scenarios">
+          <button type="button" data-preset="baseline">4K reference shape</button
+          ><button type="button" data-preset="ep1">Small expert GEMMs / EP1</button>
+          <button type="button" data-preset="split">EP across eight domains</button><button type="button" data-preset="long">64K with CP16</button>
+          <button type="button" data-preset="retain">Retain compute views</button>
+        </div>
+        <form id="roof-controls" class="card controls" onsubmit="return false">
+          <label
+            >PP ranks<select id="roof-pp">
+              <option>1</option>
+              <option>2</option>
+              <option>4</option>
+              <option selected>8</option>
+              <option>16</option>
+            </select></label
+          >
+          <label
+            >CP degree<select id="roof-cp">
+              <option selected>1</option>
+              <option>2</option>
+              <option>4</option>
+              <option>8</option>
+              <option>16</option>
+            </select></label
+          >
+          <label
+            >EP degree<select id="roof-ep">
+              <option>1</option>
+              <option>8</option>
+              <option>16</option>
+              <option>32</option>
+              <option selected>64</option>
+              <option>128</option>
+            </select></label
+          >
+          <label
+            >Context per row<select id="roof-seq">
+              <option>2048</option>
+              <option selected>4096</option>
+              <option>8192</option>
+              <option>16384</option>
+              <option>32768</option>
+              <option>65536</option>
+            </select></label
+          >
+          <label
+            >Rows per microbatch<select id="roof-rows">
+              <option selected>1</option>
+              <option>2</option>
+              <option>4</option>
+            </select></label
+          >
+          <label
+            >Microbatches / schedule<select id="roof-mbs">
+              <option>8</option>
+              <option>16</option>
+              <option>32</option>
+              <option selected>64</option>
+              <option>128</option>
+            </select></label
+          >
+          <label
+            >Equal documents per row<select id="roof-segments">
+              <option selected>1</option>
+              <option>4</option>
+              <option>16</option>
+            </select></label
+          >
+          <label
+            >Layer checkpointing<select id="roof-ac">
+              <option value="full" selected>Full recompute</option>
+              <option value="none">No layer recompute</option>
+            </select></label
+          >
+          <label
+            >FSDP lifecycle<select id="roof-policy">
+              <option value="reference" selected>Reference-like: M+1 AG / 1 RS</option>
+              <option value="reshard">Textbook: 2M AG / M RS</option>
+              <option value="retain">Retain views: 1 AG / 1 RS</option>
+            </select></label
+          >
+          <label
+            >Stage ranks per NVLink domain<select id="roof-domain">
+              <option>1</option>
+              <option>4</option>
+              <option>8</option>
+              <option>16</option>
+              <option>32</option>
+              <option selected>64</option>
+            </select></label
+          >
+          <label
+            >Expert payload accounting<select id="roof-copies">
+              <option value="assignment" selected>One copy / remote assignment</option>
+              <option value="rank">One copy / destination rank</option>
+            </select></label
+          >
+          <label
+            >PP hop resource<select id="roof-ppLink">
+              <option value="network" selected>Scale-out network</option>
+              <option value="nvlink">NVLink</option>
+            </select></label
+          >
+          <label>BF16 ceiling, TFLOP/s<input id="roof-gemm" type="number" min="100" max="2500" step="100" value="2500" /></label>
+          <label>HBM ceiling, TB/s<input id="roof-hbm" type="number" min="0.5" max="8" step="0.5" value="8" /></label>
+          <label>NVLink, one-way GB/s<input id="roof-nvl" type="number" min="25" max="900" step="25" value="900" /></label>
+          <label>Network, one-way GB/s<input id="roof-network" type="number" min="5" max="200" step="5" value="50" /></label>
+        </form>
+        <p id="roof-warning" class="warning" role="status" hidden></p>
+        <p id="roof-shape" class="shape-caption"></p>
+        <div class="result-grid roof-results" aria-live="polite">
+          <article class="card">
+            <span class="eyebrow">Tokens / update</span><strong id="roof-tokens" class="big-number"></strong>
+            <p id="roof-batch"></p>
+          </article>
+          <article class="card">
+            <span class="eyebrow">Rows / local expert</span><strong id="roof-expert-rows" class="big-number"></strong>
+            <p id="roof-expert-detail"></p>
+          </article>
+          <article class="card">
+            <span class="eyebrow">Arithmetic + resource sketch</span><strong id="roof-sketch" class="big-number"></strong>
+            <p id="roof-sketch-detail"></p>
+          </article>
+        </div>
+        <figure class="card roof-figure">
+          <div class="chart-title"><strong>Forward BF16 GEMMs: the HBM roofline</strong><span id="roof-ridge"></span></div>
+          <svg id="roof-chart" viewBox="0 0 850 455" role="img" aria-labelledby="roof-chart-title roof-chart-desc">
+            <title id="roof-chart-title">Kimi K3 forward GEMM arithmetic intensity and attainable throughput</title>
+            <desc id="roof-chart-desc">A logarithmic HBM roofline. Buttons below select a GEMM and explain its shape and position.</desc>
+          </svg>
+          <div id="roof-gemm-buttons" class="gemm-buttons" aria-label="Select a GEMM"></div>
+          <div id="roof-inspector" class="gemm-inspector" aria-live="polite"></div>
+          <figcaption>
+            These are modeled roof points, <em>not measured kernel dots</em>. B = 2(MK + KN + MN), with BF16 inputs, weights and output, one operand
+            pass and no cross-GEMM cache reuse. Tiling, padding, FP32 accumulation/casts, launch overhead and grouped-GEMM efficiency are omitted.
+            Router points show its matrix contraction only.
+          </figcaption>
+        </figure>
+        <aside class="callout">
+          <strong>Why EP helps expert GEMMs.</strong> With T = 4,096 and EP64, each local expert receives rows from <em>all 64 input ranks</em>: M =
+          EP &times; T &times; 16 / 896 = 4,681.14 expected rows. Fourteen local experts together process 65,536 assignments. EP1 instead gives M =
+          73.14 across 896 local experts. The logical FLOPs are unchanged, but matrix shapes, weight reuse and communication are not. Counts assume
+          balanced routing without dropping tokens; real per-expert row counts are integers and can be uneven.
+        </aside>
+        <noscript><p>Enable JavaScript for the calculators. The derivations and fixed measured reference remain readable.</p></noscript>
+      </section>
+
+      <section id="flops">
+        <div class="eyebrow">Take 6ND apart</div>
+        <h2>Stored parameters are not activated FLOPs</h2>
+        <p>
+          For Y = XW, with X [M,K] and W [K,N], forward costs 2MNK FLOPs. Backward has two more contractions of the same size: dX = dYW<sup>T</sup>
+          and dW = X<sup>T</sup>dY. Three contractions give 6MNK. Summed over learned matrices, this becomes 6N<sub>active</sub>D<sub>tokens</sub>.
+          Here N is <em>activated matrix weights</em>, not the entire 2.780T checkpoint.
+        </p>
+        <div class="matmul-flow" aria-label="The three contractions behind 6ND">
+          <article>
+            <span>Forward</span><strong>X<sub>MK</sub> W<sub>KN</sub></strong
+            ><small>Y<sub>MN</sub> / 2MNK</small>
+          </article>
+          <span aria-hidden="true">+</span>
+          <article>
+            <span>Input gradient</span><strong>dY<sub>MN</sub> W<sub>NK</sub></strong
+            ><small>dX<sub>MK</sub> / 2MNK</small>
+          </article>
+          <span aria-hidden="true">+</span>
+          <article>
+            <span>Weight gradient</span><strong>X<sub>KM</sub> dY<sub>MN</sub></strong
+            ><small>dW<sub>KN</sub> / 2MNK</small>
+          </article>
+        </div>
+        <pre class="formula">
+Routed expert weights activated / token
+  = 92 layers * 16 experts * 3 matrices * 3584 * 3072
+  = 48,620,371,968
+
+All learned active matrices = 104,174,092,288
+Learned-matrix training work = 625.04 GFLOP / token</pre
+        >
+        <p>
+          The familiar 104.1895B active-parameter count also includes small non-matmul weights. It is useful for a conventional metric, but those
+          weights do not each cause a dense matmul. The input embedding lookup and text-only vision path are excluded from per-token matrix compute;
+          the LM head is included.
+        </p>
+        <h3>Attention adds work without adding a weight matrix</h3>
+        <div class="table-scroll card">
+          <table>
+            <thead>
+              <tr>
+                <th>Core</th>
+                <th>Algorithmic training work / token</th>
+                <th>What is not in the formula</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>69 KDA layers</td>
+                <td>69 &times; 18 &times; 96 &times; 128 &times; 128 = 1.9535 GFLOP</td>
+                <td>
+                  Three recurrent state contractions, forward plus gradients. The actual chunked kernel also has transforms, triangular solves, FP32
+                  work and memory traffic.
+                </td>
+              </tr>
+              <tr>
+                <td>24 causal MLA layers</td>
+                <td>24 &times; 3 &times; 96 &times; (192 + 128) &times; (S<sub>eff</sub> + 1)</td>
+                <td>
+                  S<sub>eff</sub> = &Sigma; s<sub>doc</sub><sup>2</sup> / &Sigma; s<sub>doc</sub>. This counts causal QK and PV contractions, not
+                  norms, softmax or gating.
+                </td>
+              </tr>
+              <tr>
+                <td>FlashAttention replay</td>
+                <td>24 &times; 96 &times; 192 &times; (S<sub>eff</sub> + 1)</td>
+                <td>The QK contraction rematerialized by attention backward. Counted for the runtime sketch, not conventional model FLOPs.</td>
+              </tr>
+              <tr>
+                <td>Full layer checkpoint</td>
+                <td>One extra forward for decoder matrices and attention cores</td>
+                <td>
+                  The model-wide output-head GEMM is not included in the layer checkpoint replay. Full recompute also repeats MoE communication.
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          Equal documents make S<sub>eff</sub> easy to see: one 4K document gives 4,096; four independent 1K documents give 1,024. Two 2K rows have
+          the same tokenwise projection work as one 4K row, but roughly half the MLA contractions. Flattening [rows, context] to T does not remove
+          document boundaries. CP shortens <em>local</em> token arrays, not the logical context attended by MLA.
+        </p>
+        <div class="card">
+          <div class="chart-title">
+            <strong>Per-token work at the current shape</strong><span>Algorithmic accounting / not hardware counters</span>
+          </div>
+          <div id="flop-bars" class="cost-bars"></div>
+          <p id="flop-summary" class="note"></p>
+        </div>
+        <details class="card fold">
+          <summary>Model FLOPs, issued-work estimates, MFU and HFU are different quantities</summary>
+          <p>
+            The fixed training results below follow TorchTitan's convention: 6 &times; 104,189,515,872 + KDA contractions +
+            <em>non-causal</em> MLA contractions, using the configured row context. At 4K that is 645.210 GFLOP/token. The runtime sketch instead uses
+            causal pairs, learned matrices only, FlashAttention replay and the selected layer recomputation.
+          </p>
+          <p>
+            MFU = model FLOP/s divided by the chosen nominal dense hardware peak. It should not reward checkpoint recomputation. HFU includes actual
+            hardware work, but an algorithmic replay estimate is <em>not</em> a measured HFU: custom-kernel implementation work is still missing. More
+            recompute can make a job look compute-bound while making time-to-result worse.
+          </p>
+        </details>
+      </section>
+
+      <section id="communication">
+        <div class="eyebrow">Follow each byte to its destination</div>
+        <h2>EP is payload <em>and</em> control plane</h2>
+        <p>
+          K3 compresses the routed stream from 7,168 to 3,584 channels before dispatch. A BF16 latent row is 7,168 bytes, not 14,336. The shared
+          experts stay on the 7,168-wide dense path and are not dispatched. With full checkpointing, the route is traversed three times: forward,
+          recomputed forward, and the two reverse communication operations in backward.
+        </p>
+        <div class="transport-flow" aria-label="Expert communication across training phases">
+          <article><strong>Forward</strong><span>dispatch + combine</span></article>
+          <article><strong>Checkpoint replay</strong><span>dispatch + combine again</span></article>
+          <article><strong>Backward</strong><span>reverse dispatch + reverse combine</span></article>
+        </div>
+        <pre class="formula">
+No checkpoint: 4 payload exchanges / layer / microbatch
+Full checkpoint: 6 payload exchanges / layer / microbatch
+
+Assignment budget, uniform routing:
+  remote GPU copies / token = top_k * (1 - 1 / EP)
+  cross-domain copies      = top_k * (1 - local_EP_ranks / EP)
+
+Payload bytes = exchanges * local_tokens * latent_width * 2 * remote_copies</pre
+        >
+        <p>
+          One-copy-per-assignment is a conservative payload budget. If the dispatcher sends a token once per destination rank and sums results before
+          returning them, multiple chosen experts on that rank can share a copy. The second accounting option models this ideal deduplication under
+          uniform sampling without replacement; it does not assert that every backend or phase implements it. Metadata, alignment and routing weights
+          are additional.
+        </p>
+        <h3>The extra HybridEP all-gather is not an expert weight gather</h3>
+        <p>
+          The 4K reference exchanges a Boolean routing map [4,096, 896] before dispatch: 3.5 MiB locally, 224 MiB gathered across EP64, of which 220.5
+          MiB came from other ranks. The original and recomputed forward each do it. On a 12-MoE-layer stage, 64 microbatches &times; 12 layers
+          &times; 2 = 1,536 metadata all-gathers per update. Small inputs can thus imply a substantial global output and a repeated dependency.
+        </p>
+        <div class="dependency-chain" aria-label="The routing-map data dependency">
+          <span>Router / top-k</span><b aria-hidden="true">&#8594;</b><span class="dependency-comm">Routing-map all-gather</span
+          ><b aria-hidden="true">&#8594;</b> <span>Scan / permutation</span><b aria-hidden="true">&#8594;</b><span>Payload dispatch</span
+          ><b aria-hidden="true">&#8594;</b><span>Expert GEMMs</span>
+        </div>
+        <h3>FSDP counts depend on the lifecycle, not just the acronym</h3>
+        <p>
+          At PP8/EP64, routed experts have expert FSDP1: there is no routed-weight FSDP gather. Dense weights are sharded over 64 ranks. A BF16 ring
+          all-gather receives 2P(1 &minus; 1/n) bytes per rank; an FP32 reduce-scatter has the corresponding 4P(1 &minus; 1/n) budget. Multiply by the
+          <em>actual</em> number of collectives.
+        </p>
+        <div class="table-scroll card">
+          <table>
+            <thead>
+              <tr>
+                <th>Lifecycle model</th>
+                <th>Weight AG rounds / update</th>
+                <th>Gradient RS rounds / update</th>
+                <th>Tradeoff</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>4K reference-like</td>
+                <td>M + 1 = 65</td>
+                <td>1</td>
+                <td>65 gathers per layer observed in the interior-stage trace. Extrapolating that multiplier to other lab shapes is illustrative.</td>
+              </tr>
+              <tr>
+                <td>Textbook reshard</td>
+                <td>2M = 128</td>
+                <td>M = 64</td>
+                <td>Gather before forward and backward; reduce each microbatch. Lower residency can cost much more communication.</td>
+              </tr>
+              <tr>
+                <td>Retain views across the schedule</td>
+                <td>1</td>
+                <td>1</td>
+                <td>
+                  An optimistic lifecycle alternative. Keeps BF16 views and deferred gradients live; requires a different memory budget and runtime
+                  support.
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <aside class="callout">
+          <strong>512 GPUs are not one NVLink domain.</strong> EP64 fits inside NVL72 <em>if placement actually puts that group there</em>. Four GPUs
+          in a host and 72 GPUs in a scale-up domain are different units. The default lab assumes aligned 64-rank stage groups inside NVLink domains,
+          with PP hops on scale-out. It is not a verified placement description of the measured run. The split-domain preset exposes how much this
+          assumption matters.
+        </aside>
+        <p>
+          For a hierarchical collective, a domain with a of n shards need only import P(1 &minus; a/n) parameters once, then share them locally.
+          Dividing its import by a models the per-rank share of an a-NIC aggregate budget. This is an ideal domain-level network bound, not the
+          measured wire volume of NCCL's chosen algorithm. NIC sharing or a different rank layout changes it.
+        </p>
+        <div class="card">
+          <div class="chart-title">
+            <strong>Per-stage communication ledger</strong><button type="button" id="show-critical">Select slowest compute stage</button>
+          </div>
+          <div id="roof-stage-buttons" class="stage-map" aria-label="Select the PP stage for byte accounting"></div>
+          <p id="roof-stage-caption" class="note"></p>
+          <div class="table-scroll">
+            <table id="traffic-ledger">
+              <thead>
+                <tr>
+                  <th>Traffic / update</th>
+                  <th>Endpoint budget</th>
+                  <th>NVLink service</th>
+                  <th>NIC-domain budget</th>
+                  <th>Network service</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <p class="note">
+            Budgets are balanced one-direction endpoint traffic or amortized one-direction domain import; opposite-direction capacity is not added to
+            the bandwidth denominator. The two projections are <em>not disjoint byte categories</em> to add. Different collectives on the same
+            resource compete; overlap does not grant each its own full NVLink or NIC bandwidth.
+          </p>
+        </div>
+        <div class="card resource-card">
+          <div class="chart-title"><strong>Resource service at the current shape</strong><span>Maximum over PP ranks / ideal rates</span></div>
+          <div id="resource-bars" class="cost-bars"></div>
+          <p id="resource-summary" class="note"></p>
+        </div>
+        <p class="scope">
+          Long-context CP scenarios keep the logical attention length, DP count and local-token shape straight, but
+          <strong>CP attention communication is not priced</strong> here. KDA state/prefix exchange, MLA KV/head redistribution and backend-specific
+          CP collectives require their own trace-derived ledger. The 64K preset is a shape and compute comparison, not a complete long-context
+          step-time prediction.
+        </p>
+      </section>
+
+      <section id="pipeline">
+        <div class="eyebrow">The useful FLOPs still need a schedule</div>
+        <h2>Ordinary 1F1B has a bubble, not a ban on overlap</h2>
+        <p>
+          Under balanced stage costs, an ideal ordinary 1F1B schedule has compute-bubble overhead (PP &minus; 1) / M relative to useful scheduled
+          work. At PP8 and M64 that is 10.94% overhead, or 9.86% of the compute-plus-bubble interval. Each optimizer update fills and drains its own
+          pipeline; a previous warmup update does not remove those structural bubbles.
+        </p>
+        <div class="card">
+          <div class="chart-title"><strong>Current ideal compute / fill-and-drain sketch</strong><span id="bubble-label"></span></div>
+          <div class="bubble-track"><span id="bubble-useful">Scheduled work</span><span id="bubble-idle">Bubble</span></div>
+          <p id="bubble-caption" class="note"></p>
+        </div>
+        <p>
+          More microbatches help amortize the bubble, but there is a tradeoff. At fixed global batch, each microbatch gets smaller, potentially
+          lowering GEMM efficiency. In this lab the row shape stays fixed when M changes, so the global batch grows. Science determines whether that
+          larger update is appropriate.
+        </p>
+        <h3>The PP packet is bigger than [T, 7168]</h3>
+        <p>
+          K3 sends (hidden<sub>TD</sub>, delta<sub>TND</sub>). With one stage per rank, a microbatch visits each receiving rank for the first time, so
+          the residual cache cannot omit the earlier blocks. At the default 12-layer split, outgoing block counts are 2, 4, 6, 8, 10, 12 and 14. The
+          final hop carries one hidden stream plus 14 residual streams: 15 &times; 56 MiB = 840 MiB forward, and a matching gradient payload backward.
+        </p>
+        <div id="pp-packets" class="card packet-chart" aria-label="Pipeline payload sizes by outgoing edge"></div>
+        <p>
+          Interleaving with multiple virtual stages can shrink a stage's gathered working set, revisit a rank with a populated residual cache, and
+          offer different scheduling opportunities. It also adds stage boundaries and communication. It is not modeled by simply dividing the 1F1B
+          bubble or memory by VP. The lab deliberately keeps one contiguous stage per rank.
+        </p>
+        <aside class="callout">
+          <strong>The schedule and the implementation are different questions.</strong> 1F1B can overlap an independent microbatch's communication and
+          compute when operations are posted early enough. The reference trace showed exposed PP communication; that observation does not prove that
+          all 1F1B implementations must serialize it. CPU launch queues, stream dependencies, peer arrival and FSDP/EP contention need inspection.
+          CUDA graphs and fusion can reduce launch overhead; they cannot erase a true data dependency.
+        </aside>
+      </section>
+
+      <section id="muon">
+        <div class="eyebrow">Once per update, not once per microbatch</div>
+        <h2>Muon is a matrix workload of its own</h2>
+        <p>
+          FP32 momentum is persistent training history. Newton&ndash;Schulz uses a BF16 working matrix. For one expert matrix [3,584, 3,072], orient
+          the working matrix as X [r,c] with r = 3,072 and c = 3,584. A standard iteration forms A = XX<sup>T</sup>, B = bA +
+          c<sub>coef</sub>A<sup>2</sup>, then updates X using BX and a scaled X. The leading contractions cost 4r<sup>2</sup>c + 2r<sup>3</sup> FLOPs
+          per iteration.
+        </p>
+        <div class="matmul-flow muon-flow" aria-label="Newton-Schulz matrix shapes">
+          <article>
+            <span>Gram matrix</span><strong>X X<sup>T</sup></strong
+            ><small>[3072, 3072]</small>
+          </article>
+          <span aria-hidden="true">&#8594;</span>
+          <article>
+            <span>Polynomial</span><strong>A<sup>2</sup></strong
+            ><small>[3072, 3072]</small>
+          </article>
+          <span aria-hidden="true">&#8594;</span>
+          <article><span>Matrix update</span><strong>B X</strong><small>[3072, 3584]</small></article>
+        </div>
+        <p>
+          Five iterations cost about 0.966 TFLOP per logical expert matrix. An interior PP rank with 12 MoE layers and 14 experts per layer has 12
+          &times; 14 &times; 3 = 504 such matrices: about 487 TFLOP per update, before the smaller non-routed matrices, redistribution, normalization,
+          pointwise work and communication. That is a workload estimate, not an optimizer timing measurement.
+        </p>
+        <p class="note">
+          Fused gate/up storage still contains two logical expert matrices. Muon orthogonalizes those matrices separately; using one wider fused
+          storage shape would give a different Newton&ndash;Schulz cost and a different update.
+        </p>
+        <div class="equation-pair">
+          <article class="card">
+            <span class="eyebrow">Current selected stage</span><strong id="muon-work" class="roof-equation"></strong>
+            <p id="muon-work-detail"></p>
+          </article>
+          <article class="card">
+            <span class="eyebrow">Fixed 4K measured reference</span><strong class="roof-equation">1.50 s / 88.56 s = 1.69%</strong>
+            <p>
+              Exposed optimizer-phase interval, including clipping/checks/update/scheduler. This is not the duration of a CPU DistMuon annotation.
+            </p>
+          </article>
+        </div>
+        <p>
+          A long CPU optimizer span can include waiting for the pipeline's last backward or a gradient-norm collective. The reference's complete
+          exposed optimizer tail was small compared with its clean step; it does not support blaming the throughput gap on Muon alone. More tokens per
+          update amortize one optimizer update, but also change optimization and memory requirements.
+        </p>
+      </section>
+
+      <section id="reality">
+        <div class="eyebrow">Put the ceiling next to evidence</div>
+        <h2>A roofline gap is a question, not a diagnosis</h2>
+        <p>
+          The fixed 512-GB200 HybridEP references below completed 12 updates with FP32 resident/master weights and optimizer states, BF16 compute,
+          full checkpointing, PP8/FSDP64/EP64, 64 microbatches, and no CUDA graphs. Clean throughput excludes the profiled update and trace-export
+          disturbance. These measurements stay fixed when you change the lab.
+        </p>
+        <div class="table-scroll card">
+          <table id="measured-runs">
+            <thead>
+              <tr>
+                <th>Reference</th>
+                <th>Rows &times; context</th>
+                <th>Tokens/s/GPU</th>
+                <th>Implied clean update</th>
+                <th>Model TFLOP/s/GPU</th>
+                <th>Nominal dense BF16 MFU</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <p>
+          MFU here uses a fixed 2,500-TFLOP/s dense denominator and the documented TorchTitan estimator, not a 5,000-TFLOP/s sparse ceiling. The 4K
+          data are packed C4, so using a full 4K document for every row in the calculator is an attention-work upper scenario, not an audited
+          document-length histogram. The learned-routing reference also changes HybridEP to blocking mode; its slowdown is not a controlled
+          routing-imbalance-only measurement.
+        </p>
+        <h3>A concrete discrepancy: metadata wait versus byte service</h3>
+        <p>
+          In the inspected middle-stage trace, all 1,536 same-shape routing-map all-gathers were effectively exposed relative to useful model compute.
+          Their kernel residency times varied far more than a constant-byte model predicts. NCCL residency includes peer waiting and contention; it is
+          not a direct bandwidth sample.
+        </p>
+        <div class="table-scroll card">
+          <table>
+            <thead>
+              <tr>
+                <th>Routing-map all-gather</th>
+                <th>Duration</th>
+                <th>Interpretation</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Default nominal byte-service sketch</td>
+                <td id="metadata-sol"></td>
+                <td>220.5 MiB / 900 GB/s, under the assumed all-local EP placement. Not measured.</td>
+              </tr>
+              <tr>
+                <td>Observed median</td>
+                <td>1.398 ms</td>
+                <td>Identical payload, one profiled rank/update.</td>
+              </tr>
+              <tr>
+                <td>Observed P95</td>
+                <td>36.600 ms</td>
+                <td>A large long tail; not explained just by message size.</td>
+              </tr>
+              <tr>
+                <td>Observed maximum</td>
+                <td>277.746 ms</td>
+                <td>Includes progress/waiting, not only active transfer.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          Metadata calls overlapping FSDP all-gathers had a 31.464-ms median, versus 1.029 ms without that overlap. This is evidence of correlated
+          communication delay, not proof of one cause: rank arrival skew, contention and earlier compute stalls can coincide. Summing overlapping NCCL
+          bars would double-count wall time; measure interval unions and the wait before the consumer can start.
+        </p>
+        <div class="pitfall-grid">
+          <article class="card">
+            <h3>Calibrate the compute roof</h3>
+            <p>
+              Benchmark the actual grouped expert shapes and dense GEMMs at the real power cap. Separately time KDA, MLA, SiTU-GLU, norms and routing;
+              peak BF16 contraction rates do not price these kernels.
+            </p>
+          </article>
+          <article class="card">
+            <h3>Validate the fabric mapping</h3>
+            <p>
+              Map ranks to NVLink domains and NIC budgets. EP64 fitting inside NVL72 is a placement possibility, not proof that this allocation
+              achieved it.
+            </p>
+          </article>
+          <article class="card">
+            <h3>Match the collectives</h3>
+            <p>
+              Use process-group, sequence number, dtype and element count. Routing metadata and FSDP parameters can have the same NCCL kernel-family
+              name.
+            </p>
+          </article>
+          <article class="card">
+            <h3>Measure the dependency gap</h3>
+            <p>
+              Find when the router map is ready, when the all-gather finishes, and when scan/dispatch starts. Across ranks, compare arrival skew and
+              the downstream PP receive.
+            </p>
+          </article>
+        </div>
+        <p class="scope">
+          The lab omits CP-specific communication, optimizer service from its main step sketch, backend chunk work, pointwise kernels, CPU/launch
+          cost, collective startup, imbalance, allocator effects and non-ideal overlap. Its resource-plus-bubble number is an optimistic diagnostic
+          sketch,
+          <strong>not a speedup promise, validated prediction, or complete training speed of light</strong>.
+        </p>
+      </section>
+
+      <section id="sources" class="sources">
+        <h2>Sources and reproducible accounting</h2>
+        <ol>
+          <li>
+            <a href="https://github.com/MoonshotAI/Kimi-K3/blob/main/k3_tech_report.pdf">Kimi K3 technical report</a> and
+            <a href="https://huggingface.co/moonshotai/Kimi-K3/blob/main/config.json">released configuration</a>: 69 KDA / 24 MLA layers, expert and
+            latent dimensions, attention heads.
+          </li>
+          <li>
+            <a href="https://www.nvidia.com/en-us/data-center/gb200-nvl72/">NVIDIA GB200 NVL72 specifications</a>: dense versus sparse Tensor Core
+            rates, HBM and NVLink. Rates use decimal bytes; allocation sizes use binary MiB/GiB.
+          </li>
+          <li>
+            <a href="https://github.com/pytorch/torchtitan/blob/main/torchtitan/models/utils.py">TorchTitan FLOP accounting</a>,
+            <a href="https://github.com/pytorch/torchtitan/tree/main/torchtitan/models/kimi_k3">Kimi K3 implementation</a>, and
+            <a href="https://github.com/pytorch/torchtitan/blob/main/torchtitan/distributed/flex_shard/dist_muon.py">DistMuon</a>: conventional model
+            FLOPs, parameter and optimizer shapes. The lifecycle and profile observations are specific to the reference recipe.
+          </li>
+          <li>
+            <a href="https://docs.pytorch.org/docs/stable/distributed.pipelining.html">PyTorch pipeline parallelism</a> and
+            <a href="https://docs.pytorch.org/docs/stable/distributed.fsdp.fully_shard.html">FSDP</a>: scheduling, mixed precision and sharding
+            semantics.
+          </li>
+          <li>
+            Approach inspired by <a href="https://deepseek-v3.ezyang.com/studies/03-roofline.html">Edward Yang's DeepSeek-V3 roofline study</a>.
+            Background: <a href="https://doi.org/10.1145/1498765.1498785">the original roofline paper</a> and
+            <a href="https://jax-ml.github.io/scaling-book/roofline/">All About Rooflines</a>.
+          </li>
+        </ol>
+        <p>
+          The calculation source is <a href="./kimi-k3-roofline-model.js">available as plain JavaScript</a>, with
+          <a href="./kimi-k3-accounting.js">shared structural accounting</a>
+          used by the memory study. Export the current stage ledger to inspect the inputs and numbers; the export contains assumptions, not profiler
+          measurements. Fixed reference numbers are summarized from the associated training notes without internal run URLs, dataset paths or host
+          identifiers.
+        </p>
+        <div class="export-actions">
+          <button type="button" id="export-json">Download current model (JSON)</button
+          ><button type="button" id="export-csv">Download stage ledger (CSV)</button>
+        </div>
+        <nav class="series-footer" aria-label="Adjacent Kimi K3 studies">
+          <a href="./kimi-k3-memory.html">&#8592; Previous: Study 02 &mdash; Memory on 512 GB200s</a
+          ><a href="./kimi-k3.html">Back to Study 01 &mdash; Architecture</a>
+        </nav>
+      </section>
+    </main>
+  </body>
+</html>

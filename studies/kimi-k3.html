@@ -870,6 +870,7 @@
         <span class="series-title">Kimi K3 studies</span>
         <a href="./kimi-k3.html" aria-current="page">01 / Architecture</a>
         <a href="./kimi-k3-memory.html">02 / Memory</a>
+        <a href="./kimi-k3-roofline.html">03 / Roofline</a>
         <div class="series-actions">
           <button class="small-button" id="theme-toggle" type="button">Dark</button>
           <button class="small-button" type="button" onclick="window.print()">Print</button>
@@ -1476,6 +1477,12 @@
             2,722,740,830,208. The 104,189,515,872 active-text-parameter reconstruction counts 16/896 of that bank, all non-routed text-path weights,
             and the output head; it excludes the input embedding lookup and vision pathway. The released checkpoint uses MXFP4 for routed expert
             weights and MXFP8 input activations during quantization-aware post-training; parameter counts remain logical counts, not stored bytes.
+          </p>
+          <p class="note">
+            This active-parameter convention includes small non-matmul weights. The active learned matrix weights total 104,174,092,288 parameters;
+            the remaining 15,423,584 do not each perform a dense matmul per token. The
+            <a href="./kimi-k3-roofline.html">roofline study</a>
+            keeps this distinction, adds KDA and MLA contraction work, and uses document boundaries rather than squaring the flattened token count.
           </p>
           <p>
             The report also describes one MTP layer later fine-tuned into an EAGLE-3-style draft model. The released backbone configuration sets
