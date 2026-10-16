@@ -174,10 +174,11 @@ test("PP sends hidden plus the full first-visit residual stack", () => {
   const x = R.calculate();
   assert.deepEqual(
     x.stages.slice(0, -1).map((stage) => stage.after),
-    [2, 4, 6, 8, 10, 12, 14]
+    [1, 2, 3, 4, 5, 6, 7]
   );
-  assert.equal(((1 + x.stages[6].after) * x.tokens * A.D * 2) / 2 ** 20, 840);
-  assert.equal(x.stages[3].ppBytes, 64 * 4096 * 7168 * 2 * (1 + 6 + (1 + 8)));
+  assert.equal(A.attnResBlockSize, 12);
+  assert.equal(((1 + x.stages[6].after) * x.tokens * A.D * 2) / 2 ** 20, 448);
+  assert.equal(x.stages[3].ppBytes, 64 * 4096 * 7168 * 2 * (1 + 3 + (1 + 4)));
   assert.equal(R.calculate({ pp: 1 }).stages[0].ppBytes, 0);
   const nvlink = R.calculate({ ppLink: "nvlink" });
   assert.equal(nvlink.stages[3].traffic.find((item) => item.key === "pipeline").network, 0);

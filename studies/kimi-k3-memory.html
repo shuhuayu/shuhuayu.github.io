@@ -9,10 +9,11 @@
       content="An interactive memory study of full Kimi K3 on 512 GB200 GPUs: FP32 master weights and Muon momentum, BF16 compute, FSDP, expert parallelism, pipeline microbatches, and activation checkpointing."
     />
     <title>Memory: Kimi K3 on 512 GB200s</title>
-    <link rel="stylesheet" href="./kimi-k3-memory.css" />
+    <link rel="stylesheet" href="./kimi-k3-memory.css?v=memory-2" />
     <link rel="stylesheet" href="./kimi-k3-series.css" />
-    <script src="./kimi-k3-accounting.js" defer></script>
-    <script src="./kimi-k3-memory.js" defer></script>
+    <script src="./kimi-k3-accounting.js?v=memory-2" defer></script>
+    <script src="./kimi-k3-memory-model.js?v=memory-2" defer></script>
+    <script src="./kimi-k3-memory.js?v=memory-2" defer></script>
   </head>
   <body>
     <main class="page">
@@ -43,7 +44,8 @@
         </p>
         <nav class="jump-links" aria-label="Sections">
           <a href="#precision">Precision policy</a><a href="#state">The state bill</a><a href="#lab">Memory lab</a
-          ><a href="#pipeline">Pipeline lifetimes</a><a href="#fitdeck">Fitting it</a><a href="#reality">Reality check</a>
+          ><a href="#tensors">Tensor anatomy</a><a href="#workspaces">Temporary memory</a><a href="#pipeline">Pipeline lifetimes</a
+          ><a href="#fitdeck">Fitting it</a><a href="#reality">Reality check</a>
         </nav>
       </header>
 
@@ -164,10 +166,17 @@ Ideal 512-way average = 60.70 GiB / GPU</pre
         <h2>A memory lab, with its assumptions exposed</h2>
         <p>
           Pick a pipeline rank. The state ledger uses the actual 93-layer structure, including the first dense FFN, last MLA layer, embeddings, vision
-          pathway, and output head. The backward budget adds explicitly modeled working sets. It is a planning model, not a substitute for measuring
-          an implementation.
+          pathway, and output head. You can inspect every projection and activation below, change what is saved, and follow its lifetime through a
+          pipeline schedule. Structural state counts, selected tensor candidates, and chosen workspace allowances are kept distinct.
         </p>
         <form id="memory-controls" class="card controls" onsubmit="return false">
+          <label
+            >GPUs<select id="mem-world">
+              <option>256</option>
+              <option selected>512</option>
+              <option>1024</option>
+            </select></label
+          >
           <label
             >Pipeline ranks<select id="mem-pp">
               <option>1</option>
@@ -184,6 +193,7 @@ Ideal 512-way average = 60.70 GiB / GPU</pre
               <option>16</option>
               <option>32</option>
               <option selected>64</option>
+              <option>128</option>
             </select></label
           >
           <label
@@ -194,11 +204,22 @@ Ideal 512-way average = 60.70 GiB / GPU</pre
           >
           <label>Pipeline rank<select id="mem-stage"></select></label>
           <label
+            >Context parallel degree<select id="mem-cp">
+              <option selected>1</option>
+              <option>2</option>
+              <option>4</option>
+              <option>8</option>
+              <option>16</option>
+            </select></label
+          >
+          <label
             >Context per row<select id="mem-seq">
               <option>2048</option>
               <option selected>4096</option>
               <option>8192</option>
               <option>16384</option>
+              <option>32768</option>
+              <option>65536</option>
             </select></label
           >
           <label
@@ -219,11 +240,33 @@ Ideal 512-way average = 60.70 GiB / GPU</pre
             >Saved activations<select id="mem-ac">
               <option value="full" selected>Full layer checkpoint</option>
               <option value="none">Selected no-checkpoint candidates</option>
+              <option value="custom">Custom saved-tensor selection</option>
+            </select></label
+          >
+          <label
+            >Virtual chunks per rank<select id="mem-vp">
+              <option selected>1</option>
+              <option>2</option>
+              <option>4</option>
+            </select></label
+          >
+          <label
+            >Pipeline schedule<select id="mem-sched">
+              <option value="1f1b" selected>Ordinary 1F1B</option>
+              <option value="interleaved">Interleaved 1F1B</option>
+            </select></label
+          >
+          <label
+            >Active gathered chunks<select id="mem-active">
+              <option selected>1</option>
+              <option>2</option>
+              <option>4</option>
             </select></label
           >
           <label
             >BF16 compute residency<select id="mem-unit">
-              <option value="stage" selected>Whole local stage</option>
+              <option value="chunk" selected>Bounded virtual chunks</option>
+              <option value="stage">All chunks on this PP rank</option>
               <option value="layer">One layer (optimistic alternative)</option>
             </select></label
           >
@@ -235,15 +278,53 @@ Ideal 512-way average = 60.70 GiB / GPU</pre
           >
           <label
             >Unmodeled workspace budget<select id="mem-reserve">
-              <option value="0">0 GiB (floor only)</option>
+              <option value="0">0 GiB (omit allowance)</option>
               <option value="12">12 GiB</option>
               <option value="24" selected>24 GiB</option>
               <option value="36">36 GiB</option>
             </select></label
           >
+          <label
+            >Lifecycle scenario<select id="mem-phase">
+              <option value="forward">Forward: gradients cleared</option>
+              <option value="backward" selected>Backward accumulation</option>
+              <option value="optimizer">After reduction / optimizer</option>
+            </select></label
+          >
+          <label
+            >Vision parameter accounting<select id="mem-vision">
+              <option value="on" selected>Include released vision pathway</option>
+              <option value="off">Text only: remove vision parameters</option>
+            </select></label
+          >
+          <label
+            >AttnRes implementation<select id="mem-residual">
+              <option value="stack" selected>One materialized stack</option>
+              <option value="list">List / fused reduction: no stack copy</option>
+            </select></label
+          >
+          <label
+            >AttnRes block interval<select id="mem-interval">
+              <option value="12" selected>12 decoder layers (current TorchTitan)</option>
+              <option value="6">6 decoder layers (alternative)</option>
+            </select></label
+          >
+          <label
+            >Received-token multiplier<select id="mem-imbalance">
+              <option value="1" selected>1.0x (balanced expectation)</option>
+              <option value="1.25">1.25x</option>
+              <option value="1.5">1.5x</option>
+              <option value="2">2.0x</option>
+            </select></label
+          >
         </form>
+        <div class="lab-actions">
+          <button type="button" id="memory-reset">Reset to 512-GPU baseline</button
+          ><button type="button" id="memory-share">Copy this analysis link</button><span id="share-status" role="status"></span>
+        </div>
         <p id="config-warning" class="warning" role="status" hidden></p>
         <p class="note" id="ownership-note"></p>
+        <p class="note" id="layout-note"></p>
         <div id="stage-map" class="stage-map" aria-label="Select a pipeline rank"></div>
         <div class="result-grid">
           <article class="card">
@@ -256,12 +337,13 @@ Ideal 512-way average = 60.70 GiB / GPU</pre
           </article>
         </div>
         <div class="budget-chart card">
-          <div class="chart-title"><strong>Backward planning budget</strong><span id="budget-axis"></span></div>
+          <div class="chart-title"><strong id="budget-title">Backward planning budget</strong><span id="budget-axis"></span></div>
           <div id="budget-bar" class="budget-bar" aria-label="Memory budget segments"></div>
           <div id="budget-legend" class="legend"></div>
           <p class="note">
             Full deferred gradients replace reduced shards in this phase; they are not added on top of an entire second gradient copy. Actual
-            reduction can briefly overlap both and needs additional buffers.
+            reduction can briefly overlap both and needs additional buffers. Lifecycle scenarios assume initialized optimizer state; forward assumes
+            <code>zero_grad(set_to_none=True)</code>. The first-ever forward, before momentum is initialized, has a different state bill.
           </p>
         </div>
         <div class="table-scroll card">
@@ -278,11 +360,172 @@ Ideal 512-way average = 60.70 GiB / GPU</pre
         </div>
         <aside class="callout">
           <strong>Not a fit guarantee:</strong> the state counts are structural, with ideal division and no shard padding. Full-checkpoint activation
-          bytes count only layer-boundary inputs. The other activation mode counts named tensor candidates, not an exhaustive autograd liveness audit.
-          KDA chunk buffers, AttnRes residual keepalives, casts, FSDP communication, HybridEP, NCCL, allocator slack, graph pools, and Muon
-          redistribution/iteration workspaces are not separately resolved. The reserve is a user-chosen allowance, not a measured decomposition.
+          bytes count boundary inputs plus incoming residual-bank candidates, deduplicated within each chunk. Other modes count your named
+          saved-tensor selection, not an exhaustive autograd liveness audit. Full checkpointing also allows for one active layer's recomputed internal
+          candidates. The subtotal combines planning allowances; it is neither an exact peak nor a claim that their individual maxima occur together.
+          The separate workspace examples below explain important costs without pretending to decompose a measured run.
         </aside>
         <noscript><p>Enable JavaScript for the calculator. The fixed state formulas and measured reference remain readable below.</p></noscript>
+      </section>
+
+      <section id="tensors">
+        <div class="eyebrow">Follow the bytes through one layer</div>
+        <h2>A tensor anatomy, not just bytes per parameter</h2>
+        <p>
+          Select a KDA, MLA, or first dense layer. Click a computation to inspect its outputs and the weight copies it owns. The diagram follows the
+          forward dependencies; the saved-tensor checkboxes define a <em>candidate accounting policy</em> shared by matching operations in other
+          layers. They do not claim to rewrite TorchTitan's checkpoint policy.
+        </p>
+        <div class="card tensor-controls">
+          <label>Representative layer<select id="tensor-layer"></select></label>
+          <label
+            >Diagram lens<select id="tensor-lens">
+              <option value="activation" selected>Forward tensor allocations</option>
+              <option value="saved">Selected saved tensors</option>
+              <option value="master">FP32 master shards</option>
+              <option value="optimizer">FP32 optimizer states</option>
+              <option value="gradient">FP32 gradients in chosen phase</option>
+              <option value="compute">BF16 gathered weights</option>
+              <option value="combined">All categories (not a peak)</option>
+            </select></label
+          >
+          <button type="button" id="tensor-save-all">Use no-checkpoint candidates</button>
+          <button type="button" id="tensor-checkpoint">Use full layer checkpoints</button>
+        </div>
+        <p id="tensor-shape-note" class="note"></p>
+        <div class="tensor-summary" id="tensor-summary"></div>
+        <div class="anatomy-grid">
+          <div class="card anatomy-card">
+            <div class="chart-title"><strong id="anatomy-title"></strong><span id="anatomy-lens"></span></div>
+            <p class="diagram-key">
+              <span class="key-dot saved"></span>Selected saved storage <span class="key-dot recompute"></span>Recomputed / transient
+              <span class="key-dot alias"></span>View: no new storage. Dashed wires carry gates, routing metadata, or shared outputs past intervening
+              compute.
+            </p>
+            <div id="memory-anatomy" class="memory-anatomy" aria-label="Layer computation and tensor allocations"></div>
+            <p class="note">
+              Box values sum unique allocations assigned to that operation, not a cumulative memory peak. Use the inspector for alias and lifetime
+              details.
+            </p>
+          </div>
+          <aside class="card tensor-inspector" id="tensor-inspector" aria-label="Selected operation details" aria-live="polite"></aside>
+        </div>
+        <details class="card tensor-details" open>
+          <summary>Every named activation and view in this layer</summary>
+          <p class="note">
+            A checked row is charged once to its backing allocation. Changing a checkbox enters custom mode. Backend save/recompute decisions,
+            padding, and uncatalogued workspaces can differ from these candidates.
+          </p>
+          <div class="table-scroll">
+            <table id="activation-ledger">
+              <thead>
+                <tr>
+                  <th>Save?</th>
+                  <th>Tensor / operation</th>
+                  <th>Logical shape &rarr; local dimensions</th>
+                  <th>Dtype</th>
+                  <th>New storage</th>
+                  <th>Ownership / lifetime note</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </details>
+        <details class="card tensor-details" open>
+          <summary>Every trainable parameter group and its copies</summary>
+          <p class="note">
+            Logical parameter counts are global. Sizes are per GPU: PP selects layers, EP selects routed experts, FSDP shards resident history. BF16
+            views are unsharded over FSDP but still EP-local. AdamW has two moments; Muon has one.
+          </p>
+          <div class="table-scroll">
+            <table id="parameter-ledger">
+              <thead>
+                <tr>
+                  <th>Parameter group</th>
+                  <th>Weight shape</th>
+                  <th>Logical parameters</th>
+                  <th>FP32 master</th>
+                  <th>FP32 optimizer</th>
+                  <th>FP32 gradient</th>
+                  <th>BF16 compute view</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+              <tfoot></tfoot>
+            </table>
+          </div>
+        </details>
+        <aside class="callout">
+          <strong>A tensor's shape is not always its allocation size.</strong> MLA's expanded shared key and V split are views. Concatenated full K is
+          new storage. KDA's projected Q/K/V, concatenated convolution input, and convolution output are distinct allocations, while the later head
+          splits alias the convolution output. Fused routed gate/up storage contains two logical Muon matrices; do not invent another copy for each
+          view.
+        </aside>
+      </section>
+
+      <section id="workspaces">
+        <div class="eyebrow">The allocations a state formula misses</div>
+        <h2>Four temporary-memory stories</h2>
+        <p>
+          These worked sizes follow the current local token shape. They are separate examples,
+          <strong>not four extra bars added to the budget</strong>: exact concurrency, buffer reuse, fusion, and kernel versions must be measured.
+        </p>
+        <div class="workspace-grid">
+          <article class="card">
+            <span class="eyebrow">KDA: training is not inference</span>
+            <h3>Token chunks carry matrix state</h3>
+            <div id="kda-workspace"></div>
+            <p>
+              One FP32 state-equivalent per 64-token chunk scales as <code>ceil(T / 64) &times; H &times; K &times; K &times; 4</code>. Kernels can
+              save or regenerate multiple intermediates; this is a worked layout, not an assertion about every KDA backend.
+            </p>
+          </article>
+          <article class="card">
+            <span class="eyebrow">Attention residuals</span>
+            <h3>References versus materialized stacks</h3>
+            <div id="residual-workspace"></div>
+            <p>
+              Keeping a list does not erase the underlying residual vectors. It can avoid a second <code>[T, N, D]</code> stacked copy. A fused
+              reduction can also avoid full FP32 expansion. Local boundary aliases are deduplicated in the saved-bank tally; cross-chunk
+              transport/cache copies are not modeled.
+            </p>
+          </article>
+          <article class="card">
+            <span class="eyebrow">SiTU-GLU recomputation</span>
+            <h3>FP32 casts cover routed rows</h3>
+            <div id="situ-workspace"></div>
+            <p>
+              Gate and up each span <code>[R, F]</code>, where balanced <code>R = 16T</code>. In eager mode, casts and pointwise results occupy HBM.
+              Compiling/fusing this region can keep some values in registers or eliminate buffers; it does not reduce master weights or optimizer
+              states.
+            </p>
+          </article>
+          <article class="card">
+            <span class="eyebrow">Muon Newton&ndash;Schulz</span>
+            <h3>Small matrices, batched working sets</h3>
+            <label
+              >Illustrative matrices per batch<select id="workspace-batch">
+                <option>1</option>
+                <option selected>14</option>
+                <option>28</option>
+                <option>56</option>
+              </select></label
+            >
+            <div id="muon-workspace"></div>
+            <p>
+              A routed logical matrix is <code>[F, Z] = [3072, 3584]</code>; the Gram side is 3072, not the fused gate/up storage's 6144. FP32
+              momentum is already in the state tally. BF16 iteration copies, old/new iterates, Gram polynomials, redistribution, and NCCL buffers are
+              optimizer-phase costs.
+            </p>
+          </article>
+        </div>
+        <aside class="callout">
+          <strong>BF16 reduction is a communication policy, not a new master dtype.</strong> Reducing in BF16 can shrink reduction payloads/buffers
+          while the resident parameter, optimizer-visible gradient shard, and Muon momentum remain FP32. It does not halve the orange FP32
+          gradient-history bar. Similarly, a lower-precision released checkpoint is not a lower-precision training-state recipe.
+        </aside>
+        <p id="head-workspace" class="note"></p>
       </section>
 
       <section id="parallelism">
@@ -326,6 +569,13 @@ At PP8 / EP64 / FSDP64: expert_FSDP = 1</pre
           create additional aggregate HBM. And the 512 GPUs do not form one pooled allocation space: every rank must stay within its own device
           capacity.
         </p>
+        <p>
+          <strong>Context parallelism changes the local token axis, not the global context.</strong> With CP16, one 64K row gives 4K local tokens;
+          dense FSDP still spans DP &times; CP = 64 ranks in the default 512-GPU / PP8 layout. MLA's head-sharded Ulysses exchange turns
+          <code>[4096, 96, channels]</code> into <code>[65536, 6, channels]</code>, preserving this tensor's element count while attending across the
+          full 64K sequence. Attention work and communication still change. A KV-all-gather CP backend has a different working set and is not modeled
+          here; an unchanged local tensor subtotal alone does not prove a long-context configuration will fit.
+        </p>
       </section>
 
       <section id="pipeline">
@@ -337,14 +587,51 @@ At PP8 / EP64 / FSDP64: expert_FSDP = 1</pre
           logical schedule bound, excluding implementation-specific send/receive buffers and keepalives.
         </p>
         <div class="card pipeline-card">
-          <div class="chart-title"><strong>Peak unfinished forwards by PP rank</strong><span id="pipeline-caption"></span></div>
+          <div class="chart-title"><strong>Peak saved-tensor candidates by PP rank</strong><span id="pipeline-caption"></span></div>
           <div id="pipeline-lifetimes" class="pipeline-lifetimes"></div>
         </div>
-        <p class="formula compact">Peak unfinished forwards on rank r = min(microbatches, PP - r)</p>
+        <p class="formula compact" id="pipeline-formula">Ordinary 1F1B: peak unfinished forwards on rank r = min(microbatches, PP - r)</p>
+        <div class="card schedule-card">
+          <div class="chart-title"><strong>Selected rank: forward-to-backward lifetimes</strong><span id="schedule-caption"></span></div>
+          <label class="schedule-slider"
+            >Inspect logical action <input id="life-step" type="range" min="0" max="128" value="5" /><output id="life-position"></output
+          ></label>
+          <div id="schedule-inspector" class="schedule-inspector" role="status"></div>
+          <div class="schedule-scroll" id="schedule-diagram"></div>
+          <p class="note">
+            The horizontal axis is local logical action order, <strong>not elapsed time</strong>. F adds a saved activation set; B releases it at
+            completion. Spans show the first few microbatches of each chunk. The live-storage curve covers the entire schedule. Click a span or use
+            the slider to inspect it. No communication overlap or speedup is inferred from this diagram.
+          </p>
+        </div>
+        <p id="pipeline-live-note"></p>
+        <details class="card tensor-details" open>
+          <summary>Compare ordinary and interleaved lifetimes</summary>
+          <p class="note">
+            Same hardware, PP/CP/EP, row shape, microbatch count, and saved-tensor policy. These comparisons show backward scenarios with one gathered
+            chunk. Virtual splitting changes the layer mix on a physical rank; aggregate resident state is conserved. They are memory-accounting
+            alternatives, not speed predictions.
+          </p>
+          <div class="table-scroll">
+            <table id="policy-comparison">
+              <thead>
+                <tr>
+                  <th>Schedule / VP</th>
+                  <th>Local chunks / layers</th>
+                  <th>Max unfinished chunk forwards</th>
+                  <th>One BF16 gathered chunk</th>
+                  <th>Scheduled saved candidates</th>
+                  <th>FP32 update-state tally</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </details>
         <p>
           At the default shape, local packed tokens <code>T = rows × context = 4096</code>. One BF16 <code>[T, 7168]</code> stream is 56 MiB. Twelve
-          checkpointed layer inputs across five unfinished forwards on rank 3 give a <em>boundary-input floor</em> of 3.28 GiB. The growing AttnRes
-          bank and kernel workspaces are additional, not hidden inside that number.
+          checkpointed layer inputs across five unfinished forwards on rank 3 give a <em>boundary-input floor</em> of 3.28 GiB. The expanded lab
+          counts incoming residual-bank candidates separately, then allows for an active layer's recomputation and a chosen workspace budget.
         </p>
         <p>
           Global tokens per update are <code>DP × microbatches × rows × context</code>: <code>64 × 64 × 1 × 4096 = 16,777,216</code>. Increasing
@@ -360,8 +647,10 @@ At PP8 / EP64 / FSDP64: expert_FSDP = 1</pre
         <aside class="callout">
           <strong>Checkpointing and virtual stages solve different problems.</strong> Recompute reduces saved internal activations. Smaller virtual
           stages can reduce the largest simultaneously gathered FSDP unit, if the runtime limits active unsharded stages. They do not remove the
-          master or momentum state for the other virtual stage. The default here is ordinary 1F1B with one stage per PP rank, not an interleaved or
-          DualPipe schedule.
+          master or momentum state for the other virtual stage. Interleaving can also increase the number of unfinished activation sets: a smaller
+          gathered chunk does not automatically mean a smaller activation peak. The active-chunk control is a residency assumption: prefetch and
+          atomic compound actions can transiently exceed a runtime's target <code>max_active_stages</code>. The default here is ordinary 1F1B with one
+          stage per PP rank.
         </aside>
         <p class="note">
           The whole-stage BF16 bar is a residency budget, not a count of all-gather calls. In the reference trace, an interior 12-layer stage made 780
@@ -489,9 +778,11 @@ At PP8 / EP64 / FSDP64: expert_FSDP = 1</pre
         </ol>
         <p>
           GiB = 2<sup>30</sup> bytes; TiB = 2<sup>40</sup> bytes. Structural totals match study 01. Shards are modeled by ideal division, ignoring
-          per-tensor padding. Non-default PP splits are contiguous illustrative partitions, not validated launch recipes. The selected-activation
-          model omits kernel-specific state and may include candidates an implementation aliases or recomputes. No internal run links, data paths, or
-          cluster identifiers are included.
+          per-tensor padding. VP1 uses the reference contiguous ceil(93 / PP) split; VP2/VP4 use PyTorch's automatic split with embedding/head weights
+          of one and cyclic chunk-to-rank assignment. Non-default settings are accounting scenarios, not validated launch recipes. AttnRes uses the
+          current TorchTitan interval of 12 decoder layers by default; the alternative interval is explicit. The selected-activation model omits
+          kernel-specific state and may include candidates an implementation aliases or recomputes. No internal run links, data paths, or cluster
+          identifiers are included.
         </p>
         <nav class="series-footer" aria-label="Adjacent Kimi K3 studies">
           <a href="./kimi-k3.html">&#8592; Previous: Study 01 &mdash; Architecture</a>
