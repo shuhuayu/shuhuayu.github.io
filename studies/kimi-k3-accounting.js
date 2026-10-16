@@ -7,6 +7,7 @@
   const F = 3072;
   const experts = 896;
   const topK = 16;
+  const attnResBlockSize = 12;
   const embedding = D * 163840;
   const vision = 447358976;
   const sum = (items, get) => items.reduce((total, item) => total + get(item), 0);
@@ -85,6 +86,7 @@
     F,
     experts,
     topK,
+    attnResBlockSize,
     embedding,
     vision,
     layers,

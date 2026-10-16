@@ -12,8 +12,8 @@
     <link rel="stylesheet" href="./kimi-k3-memory.css" />
     <link rel="stylesheet" href="./kimi-k3-series.css" />
     <link rel="stylesheet" href="./kimi-k3-roofline.css" />
-    <script src="./kimi-k3-accounting.js" defer></script>
-    <script src="./kimi-k3-roofline-model.js" defer></script>
+    <script src="./kimi-k3-accounting.js?v=memory-2" defer></script>
+    <script src="./kimi-k3-roofline-model.js?v=memory-2" defer></script>
     <script src="./kimi-k3-roofline.js" defer></script>
   </head>
   <body>
@@ -531,8 +531,10 @@ Payload bytes = exchanges * local_tokens * latent_width * 2 * remote_copies</pre
         <h3>The PP packet is bigger than [T, 7168]</h3>
         <p>
           K3 sends (hidden<sub>TD</sub>, delta<sub>TND</sub>). With one stage per rank, a microbatch visits each receiving rank for the first time, so
-          the residual cache cannot omit the earlier blocks. At the default 12-layer split, outgoing block counts are 2, 4, 6, 8, 10, 12 and 14. The
-          final hop carries one hidden stream plus 14 residual streams: 15 &times; 56 MiB = 840 MiB forward, and a matching gradient payload backward.
+          the residual cache cannot omit the earlier blocks. With the released/current TorchTitan interval of 12 decoder layers and the default
+          12-layer PP split, outgoing residual-bank counts are 1, 2, 3, 4, 5, 6 and 7. The final hop carries one hidden stream plus seven residual
+          streams: 8 &times; 56 MiB = 448 MiB forward, and a matching gradient payload backward. The
+          <a href="./kimi-k3-memory.html#workspaces">memory study</a> distinguishes these bank references from temporary materialized stacks.
         </p>
         <div id="pp-packets" class="card packet-chart" aria-label="Pipeline payload sizes by outgoing edge"></div>
         <p>

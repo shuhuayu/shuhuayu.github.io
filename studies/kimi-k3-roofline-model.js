@@ -58,7 +58,7 @@
   }
 
   function ppPacketBlocks(stage) {
-    return stage.layers.length ? Math.ceil((stage.layers[stage.layers.length - 1].index + 1) / 6) : 0;
+    return stage.layers.length ? Math.ceil((stage.layers[stage.layers.length - 1].index + 1) / A.attnResBlockSize) : 0;
   }
 
   function calculate(input = {}) {
