@@ -1,0 +1,631 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="An interactive, infrastructure-oriented guide to DeepSeek V4 Pro and Flash: compressed attention, mHC, MoE, logical tensor shapes, parameters, cache scaling, and hybrid Muon."
+    />
+    <meta name="robots" content="noindex, follow" />
+    <title>An infra-oriented diagram of DeepSeek V4</title>
+    <link rel="canonical" href="https://shuhuayu.github.io/studies/deepseek-v4.html" />
+    <link rel="stylesheet" href="./deepseek-v4.css" />
+    <link rel="stylesheet" href="./kimi-k3-series.css" />
+    <script src="./deepseek-v4-model.js" defer></script>
+    <script src="./deepseek-v4.js" defer></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to the study</a>
+    <div class="page">
+      <nav class="series" aria-label="Architecture studies">
+        <span class="series-title">Architecture studies</span>
+        <a href="./kimi-k3.html">Kimi K3</a>
+        <a href="./deepseek-v4.html" aria-current="page">DeepSeek V4</a>
+        <a href="./deepseek-v4-1-flash.html">V4.1 Flash</a>
+        <a href="../">Homepage</a>
+        <div class="series-actions">
+          <button class="small-button" id="theme-toggle" type="button">Dark</button>
+          <button class="small-button" id="print-button" type="button">Print</button>
+        </div>
+      </nav>
+      <header class="hero">
+        <div class="eyebrow">Compress time &middot; mix depth &middot; route width</div>
+        <h1>An infra-oriented diagram of DeepSeek V4</h1>
+        <p class="dek">
+          A trillion-class expert bank behind a much narrower active path. Long-context attention compresses what it stores, mHC mixes four residual
+          streams, and Muon updates whole matrices across distributed shards.
+        </p>
+        <p class="disclosure">
+          Based on the <a href="https://huggingface.co/deepseek-ai/DeepSeek-V4-Pro">official V4 model card</a>,
+          <a href="https://arxiv.org/abs/2606.19348">technical report</a>, and released configuration and inference code. Shapes are logical, before
+          parallelism. Layers are numbered from 1 here; code indices start at 0. This is V4, not the later V4.1 architecture.
+        </p>
+        <nav class="study-links" aria-label="Jump to a section">
+          <a href="#anatomy">Model &amp; layer map</a>
+          <a href="#computation">Computation diagram</a>
+          <a href="#attention">CSA &amp; HCA</a>
+          <a href="#mhc">mHC &amp; MoE</a>
+          <a href="#parameters">Parameter counts</a>
+          <a href="#cache">Cache scaling</a>
+          <a href="#muon">Muon</a>
+          <a href="#training">Training infrastructure</a>
+        </nav>
+        <div class="model-controls">
+          <div class="model-toggle" role="group" aria-label="Model variant">
+            <button type="button" data-model="pro" aria-pressed="true">V4 Pro</button>
+            <button type="button" data-model="flash" aria-pressed="false">V4 Flash</button>
+          </div>
+          <span class="note" id="model-readout" aria-live="polite">Pro &middot; hidden width 7,168 &middot; 128 query heads</span>
+        </div>
+        <div class="stats" aria-label="Selected model specifications">
+          <div class="stat"><strong id="stat-total">1.6T</strong><span>reported total parameters</span></div>
+          <div class="stat"><strong id="stat-active">49B</strong><span>reported active per token</span></div>
+          <div class="stat"><strong id="stat-layers">61</strong><span>decoder layers, plus 1 MTP</span></div>
+          <div class="stat"><strong id="stat-attention">30 + 31</strong><span id="stat-attention-label">CSA + HCA layers</span></div>
+          <div class="stat"><strong id="stat-experts">6 / 384</strong><span>routed experts active, +1 shared</span></div>
+          <div class="stat"><strong>1M</strong><span>1,048,576-token context limit</span></div>
+        </div>
+      </header>
+
+      <main id="main" tabindex="-1">
+        <section id="anatomy">
+          <div class="section-kicker">01 / The big picture</div>
+          <h2>The model at a glance</h2>
+          <p class="section-lede">
+            Every decoder block has an MoE feed-forward network. The first three blocks use token-ID-based hash routing, not dense FFNs. Attention
+            alternates between a lightly compressed sparse view and a heavily compressed global view, always retaining a local 128-token window.
+          </p>
+          <div class="card padded">
+            <div class="overview-grid">
+              <div class="overview-box swa">
+                <span class="label">Text input</span><strong>Token embedding</strong>
+                <div class="mini-node">129,280 vocabulary entries</div>
+                <div class="mini-node" id="embedding-shape">T &times; 7,168</div>
+                <div class="mini-node">Replicate into 4 residual streams</div>
+              </div>
+              <div class="overview-box">
+                <span class="label">Sequential decoder</span><strong id="stack-label">61 blocks at width 7,168</strong>
+                <div class="rhythm">
+                  <div class="csa">CSA / 4:1 + top-K</div>
+                  <div class="hca">HCA / 128:1 + dense</div>
+                </div>
+                <div class="rail moe" id="expert-ribbon">384 routed experts, choose 6 + 1 shared</div>
+                <div class="rail mhc">mHC around attention and MoE &middot; 4 streams, same inner width D</div>
+                <div class="mini-node">Each layer owns its own compressed memory; V4 does not use V4.1-style cross-layer KV sharing.</div>
+              </div>
+              <div class="overview-box" style="--accent: var(--gold)">
+                <span class="label">Prediction</span><strong>Mix back to D</strong>
+                <div class="mini-node">Final mHC reduction + RMSNorm</div>
+                <div class="mini-node">Untied vocabulary head</div>
+                <div class="mini-node">Separate MTP block; shares embedding / output weights</div>
+              </div>
+            </div>
+            <div class="legend" aria-label="Layer types">
+              <span class="csa"><i></i> CSA / 4:1</span><span class="hca"><i></i> HCA / 128:1</span><span class="swa"><i></i> SWA only</span>
+              <span>Gold top border = hash-routed MoE</span>
+            </div>
+            <div id="layer-map" class="layer-map" role="group" aria-label="Choose a decoder layer"></div>
+            <div id="layer-readout" class="layer-readout" aria-live="polite"></div>
+            <p class="note">
+              Click a layer to update the computation diagram. The release config has one extra compression-ratio entry of 0 for the MTP block; it is
+              not an extra decoder layer.
+            </p>
+          </div>
+          <div class="reading-notes">
+            <article class="reading-note csa">
+              <h3>Compression and sparsity are different</h3>
+              <p>
+                CSA stores one entry per four tokens, then chooses only a subset to read. All compressed entries remain in the cache, even those not
+                selected by this query.
+              </p>
+            </article>
+            <article class="reading-note hca">
+              <h3>HCA is not fixed-state attention</h3>
+              <p>
+                Its memory still grows with context, at one entry per 128 tokens. It reads all causally available compressed entries instead of
+                running an indexer.
+              </p>
+            </article>
+            <article class="reading-note mhc">
+              <h3>Four streams do not make GEMMs four times wider</h3>
+              <p>
+                mHC contracts the residual state to one D-wide input before each attention or MoE call, then broadcasts the result back with learned
+                mixing.
+              </p>
+            </article>
+            <article class="reading-note moe">
+              <h3>Most parameters are inactive for any one token</h3>
+              <p>One token touches six routed experts and one shared expert per layer. It does not execute all 384 expert networks in Pro.</p>
+            </article>
+          </div>
+        </section>
+
+        <section id="computation">
+          <div class="section-kicker">02 / From tensors to kernels</div>
+          <h2>Follow one decoder block</h2>
+          <p class="section-lede">
+            Choose a layer and click an operation to inspect its weight shape, logical output, and backward dependencies. Heavy borders mark matrix
+            multiplies and attention; dashed borders mark distributed expert movement.
+          </p>
+          <div class="controls card">
+            <label>Decoder layer<select id="kernel-layer" aria-label="Decoder layer"></select></label>
+            <label
+              >Packed tokens T<select id="kernel-tokens">
+                <option value="1024">1,024</option>
+                <option value="4096" selected>4,096</option>
+                <option value="8192">8,192</option>
+                <option value="16384">16,384</option>
+              </select></label
+            >
+            <label
+              >Labels<select id="kernel-lens">
+                <option value="shapes">Tensor shapes</option>
+                <option value="params">Weight parameters</option>
+              </select></label
+            >
+            <label
+              >Backward policy<select id="kernel-storage">
+                <option value="autograd">No checkpointing</option>
+                <option value="checkpoint">Full block checkpoint</option>
+              </select></label
+            >
+          </div>
+          <div class="kernel-legend">
+            <span><i class="kernel-key gemm"></i>GEMM / attention</span><span><i class="kernel-key"></i>Norm / layout / elementwise</span
+            ><span><i class="kernel-key comm"></i>Expert dispatch / combine</span>
+          </div>
+          <p class="note">
+            T denotes packed tokens in a logical invocation. R = 6T is the number of routed token-expert assignments across the expert group, not the
+            workload on every GPU. The diagram assumes one continuous sequence only when showing compressed-entry counts; real packed sequences
+            require independent causal boundaries.
+          </p>
+          <div class="kernel-layout">
+            <div class="kernel-diagram card" id="kernel-diagram"></div>
+            <aside class="kernel-inspector card" id="kernel-inspector" aria-live="polite"></aside>
+          </div>
+          <noscript
+            ><p>
+              Enable JavaScript for the diagram and calculators. The descriptions and configuration table below remain readable without it.
+            </p></noscript
+          >
+        </section>
+
+        <section id="attention">
+          <div class="section-kicker">03 / Two resolutions of history</div>
+          <h2>Compress first. Select only when needed.</h2>
+          <p class="section-lede">
+            Both paths use shared-key-value multi-query attention: one 512-dimensional memory vector serves as both K and V for all query heads. The
+            last 64 dimensions carry RoPE; attention output receives inverse RoPE before the grouped projection.
+          </p>
+          <div class="two-col">
+            <article class="component-card card csa">
+              <h3>CSA: four-token compression, sparse reading</h3>
+              <p>
+                Two KV projections and two gate projections create previous/current candidates. A per-channel softmax pools eight candidates from two
+                adjacent four-token groups into one compressed entry. Groups overlap, so the <em>storage</em> reduction is 4:1, not 8:1.
+              </p>
+              <div class="pool-visual" aria-label="Two adjacent groups of four tokens pool into one compressed entry">
+                <div class="token-group"><span>t0</span><span>t1</span><span>t2</span><span>t3</span></div>
+                <span>+</span>
+                <div class="token-group"><span>t4</span><span>t5</span><span>t6</span><span>t7</span></div>
+                <span>&rarr;</span>
+                <div class="compressed-entry">1 entry</div>
+              </div>
+              <p>
+                A separate lightning indexer reuses the low-rank query latent, makes 64 query heads of dimension 128, and scores causally available
+                compressed index keys. Top-K selects positions for the main attention.
+              </p>
+              <div class="equation">
+                score(t, s) = &Sigma;<sub>h</sub> w<sub>t,h</sub> ReLU(q<sup>I</sup><sub>t,h</sub> &middot; k<sup>I</sup><sub>s</sub>)
+              </div>
+              <ul class="fact-list">
+                <li><span>Compression</span><strong>4:1, overlapping</strong></li>
+                <li><span>Indexer</span><strong>64 &times; 128, FP4</strong></li>
+                <li><span>Selected entries</span><strong id="csa-topk">1,024 in Pro</strong></li>
+                <li><span>At 1M context</span><strong>262,144 stored / layer</strong></li>
+              </ul>
+              <p class="source-note">
+                <a href="https://arxiv.org/html/2606.19348v1#S2.SS3.SSS1">Report &sect;2.3.1</a>. The indexer still examines the compressed candidate
+                pool; top-K bounds the expensive main attention, not every operation in the system.
+              </p>
+            </article>
+            <article class="component-card card hca">
+              <h3>HCA: 128-token compression, global reading</h3>
+              <p>
+                One KV projection and one gate projection pool each non-overlapping group of 128 tokens into one entry. No lightning indexer is
+                needed: each query reads every completed, causally available compressed block.
+              </p>
+              <div class="pool-visual" aria-label="A non-overlapping group of 128 tokens pools into one compressed entry">
+                <div class="compressed-entry">128 consecutive tokens</div>
+                <span>&rarr;</span>
+                <div class="compressed-entry">1 entry</div>
+              </div>
+              <p>
+                The longer pooling interval makes its global memory much smaller. The tradeoff is coarser historical detail; CSA supplies a
+                finer-grained view in the alternating layers.
+              </p>
+              <div class="equation">
+                c<sub>block</sub> = &Sigma;<sub>t in block</sub> softmax<sub>t</sub>(z<sub>t</sub> + b<sub>t</sub>) &odot; v<sub>t</sub>
+              </div>
+              <ul class="fact-list">
+                <li><span>Compression</span><strong>128:1, no overlap</strong></li>
+                <li><span>Indexer / top-K</span><strong>Neither</strong></li>
+                <li><span>At 1M context</span><strong>8,192 stored / layer</strong></li>
+                <li><span>Local window</span><strong>128 uncompressed tokens</strong></li>
+              </ul>
+              <p class="source-note">
+                <a href="https://arxiv.org/html/2606.19348v1#S2.SS3.SSS2">Report &sect;2.3.2</a>. The global path is dense over compressed entries,
+                not dense over the original million-token sequence.
+              </p>
+            </article>
+          </div>
+          <div class="callout">
+            <strong>The local window preserves fine detail and causality.</strong> Incomplete future blocks are not available to a query. The
+            128-token uncompressed window covers recent tokens that compression would otherwise hide. Local and compressed candidates feed the same
+            attention softmax, with a learned per-head attention sink.
+          </div>
+          <div class="table-wrap card">
+            <table>
+              <caption class="note">
+                Released V4 dimensions; Pro-Max is a reasoning-effort setting, not a separate backbone.
+              </caption>
+              <thead>
+                <tr>
+                  <th>Configuration</th>
+                  <th>Pro</th>
+                  <th>Flash</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>Decoder layers / hidden width</td>
+                  <td>61 / 7,168</td>
+                  <td>43 / 4,096</td>
+                </tr>
+                <tr>
+                  <td>CSA / HCA / SWA-only layers</td>
+                  <td>30 / 31 / 0</td>
+                  <td>21 / 20 / 2</td>
+                </tr>
+                <tr>
+                  <td>Query heads / head dimension</td>
+                  <td>128 / 512</td>
+                  <td>64 / 512</td>
+                </tr>
+                <tr>
+                  <td>Query latent rank</td>
+                  <td>1,536</td>
+                  <td>1,024</td>
+                </tr>
+                <tr>
+                  <td>Output groups / rank per group</td>
+                  <td>16 / 1,024</td>
+                  <td>8 / 1,024</td>
+                </tr>
+                <tr>
+                  <td>Routed experts / active / shared</td>
+                  <td>384 / 6 / 1</td>
+                  <td>256 / 6 / 1</td>
+                </tr>
+                <tr>
+                  <td>Expert intermediate width</td>
+                  <td>3,072</td>
+                  <td>2,048</td>
+                </tr>
+                <tr>
+                  <td>CSA top-K</td>
+                  <td>1,024</td>
+                  <td>512</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section id="mhc">
+          <div class="section-kicker">04 / Depth and width</div>
+          <h2>Four residual streams. Seven active experts.</h2>
+          <div class="two-col">
+            <article class="component-card card mhc">
+              <h3>mHC: constrain the residual highway</h3>
+              <p>
+                The residual state is T &times; 4 &times; D. Before each sublayer, a normalized flattened 4D vector produces 24 mixing values: 4 input
+                coefficients, 4 output coefficients, and a 4 &times; 4 residual matrix.
+              </p>
+              <div class="stream-visual" aria-label="Four residual streams">
+                <div>stream 1</div>
+                <div>stream 2</div>
+                <div>stream 3</div>
+                <div>stream 4</div>
+              </div>
+              <div class="equation">X<sub>next</sub> = B X + C F(A X)</div>
+              <p>
+                Sigmoid bounds A and 2 &times; sigmoid bounds C. Twenty Sinkhorn iterations make B approximately doubly stochastic: positive entries,
+                with each row and column summing to one. The ideal constrained residual mapping is non-expansive and remains stable under composition.
+              </p>
+              <p>
+                The expensive sublayer F still receives T &times; D. The four-way expansion affects residual storage and the small mixing operation,
+                not the attention and expert input widths.
+              </p>
+              <p class="source-note">
+                <a href="https://arxiv.org/html/2606.19348v1#S2.SS2">Report &sect;2.2</a>. This is standard V4 mHC, not V4.1 Single-Pass mHC.
+              </p>
+            </article>
+            <article class="component-card card moe">
+              <h3>DeepSeekMoE: capacity behind sparse routing</h3>
+              <p>
+                Every block owns a bank of fine-grained routed experts and one always-active shared expert. Scores use sqrt(softplus), with a
+                balancing bias affecting selection but not the gathered expert weights.
+              </p>
+              <div class="equation">expert(x) = W<sub>2</sub> [SiLU(W<sub>1</sub>x) &odot; W<sub>3</sub>x]</div>
+              <p>
+                The first three layers select experts using a token-ID hash table; later layers use score-based top-6 selection. Both execute real MoE
+                networks. The reference clips SwiGLU activations to limit outliers.
+              </p>
+              <p>
+                A packed input of T tokens generates 6T routed assignments. Expert parallelism redistributes those assignments to expert owners,
+                combines their weighted outputs, and adds the shared expert result.
+              </p>
+              <ul class="fact-list">
+                <li><span>Routed assignments</span><strong>R = 6T</strong></li>
+                <li><span>Weight matrices / expert</span><strong>3 &times; D &times; F</strong></li>
+                <li><span>Always active</span><strong>1 shared expert</strong></li>
+              </ul>
+              <p class="source-note">
+                <a href="https://arxiv.org/html/2606.19348v1#S2.SS1">Report &sect;2.1</a> and
+                <a href="https://huggingface.co/deepseek-ai/DeepSeek-V4-Pro/blob/main/inference/model.py">released Gate / Expert / MoE code</a>.
+              </p>
+            </article>
+          </div>
+        </section>
+
+        <section id="parameters">
+          <div class="section-kicker">05 / Where the weights live</div>
+          <h2>Parameter capacity is mostly expert capacity</h2>
+          <p class="section-lede">
+            This ledger reconstructs logical trainable parameter elements from the released dimensions and inference modules. It counts all routed
+            experts, not just the six used by a token. Quantization changes their stored bytes, not their logical parameter count.
+          </p>
+          <div class="metrics" aria-live="polite">
+            <div class="metric"><strong id="param-total"></strong><span>reconstructed decoder + embedding / head</span></div>
+            <div class="metric"><strong id="param-routed"></strong><span>share in routed expert banks</span></div>
+            <div class="metric"><strong id="param-mtp"></strong><span>additional MTP parameters</span></div>
+          </div>
+          <div class="table-wrap card">
+            <table class="param-table">
+              <thead>
+                <tr>
+                  <th>Component</th>
+                  <th>Logical formula</th>
+                  <th class="numeric">Parameters</th>
+                  <th class="numeric">Share</th>
+                </tr>
+              </thead>
+              <tbody id="parameter-rows"></tbody>
+            </table>
+          </div>
+          <p class="note">
+            D = hidden width; F = expert intermediate width; L = decoder layers; E = routed experts; H/K = query heads/head dimension; q = query rank;
+            G/r = output groups/rank; V = vocabulary. Biases, RMSNorm weights and attention sinks are included. Frozen token-ID lookup tables,
+            quantization scales and storage padding are excluded. MTP shares the embedding and vocabulary head and is listed separately, avoiding
+            double-counting. Headline 1.6T/284B and 49B/13B are the publisher's reported figures, not exact outputs of this calculator.
+          </p>
+          <div class="callout">
+            <strong>Do not turn FP4 checkpoint size into a training-memory estimate.</strong> In the instruction-tuned release, routed expert weights
+            use FP4 and most other weights use FP8; the base releases use mixed FP8. Gradients, optimizer state, master weights, activations,
+            communication buffers, and quantization metadata need separate accounting.
+          </div>
+        </section>
+
+        <section id="cache">
+          <div class="section-kicker">06 / What grows with context</div>
+          <h2>A smaller cache, not a constant-size cache</h2>
+          <p class="section-lede">
+            Only completed blocks occupy compressed history. CSA keeps N/4 main entries and N/4 index entries per layer; HCA keeps N/128 main entries.
+            The local ring buffer saturates at 128 entries per layer.
+          </p>
+          <div class="cache-tool card">
+            <div class="controls">
+              <label
+                >Context length <output id="context-value" for="context-range">1,048,576 tokens</output
+                ><input id="context-range" type="range" min="7" max="20" value="20" step="1" aria-label="Context length in powers of two"
+              /></label>
+              <label
+                >Cache representation<select id="cache-precision">
+                  <option value="mixed">Report mixed: main FP8/BF16 + index FP4</option>
+                  <option value="bf16">All-BF16 payload comparison</option>
+                </select></label
+              >
+              <label>Concurrent requests<input id="cache-requests" type="number" min="1" max="128" step="1" value="1" /></label>
+              <p class="note">
+                Mixed payload = 448 FP8 + 64 BF16 main dimensions (576 bytes), and 128 FP4 index dimensions (64 bytes). One main entry serves as both
+                K and V, shared across all query heads.
+              </p>
+            </div>
+            <div aria-live="polite">
+              <div class="cache-row csa">
+                <span>CSA main KV</span>
+                <div class="track"><div id="csa-fill" class="fill"></div></div>
+                <span id="csa-value"></span>
+              </div>
+              <div class="cache-row hca">
+                <span>HCA main KV</span>
+                <div class="track"><div id="hca-fill" class="fill"></div></div>
+                <span id="hca-value"></span>
+              </div>
+              <div class="cache-row moe">
+                <span>CSA index keys</span>
+                <div class="track"><div id="index-fill" class="fill"></div></div>
+                <span id="index-value"></span>
+              </div>
+              <div class="cache-row swa">
+                <span>Local windows</span>
+                <div class="track"><div id="local-fill" class="fill"></div></div>
+                <span id="local-value"></span>
+              </div>
+              <div class="cache-row" style="--accent: var(--gold)">
+                <span><strong>V4 total</strong></span>
+                <div class="track"><div id="total-fill" class="fill"></div></div>
+                <span id="total-value"></span>
+              </div>
+              <div class="cache-baseline">
+                <div class="cache-row">
+                  <span>GQA8 baseline</span>
+                  <div class="track"><div class="fill" style="width: 100%; background: var(--line-strong)"></div></div>
+                  <span id="baseline-value"></span>
+                </div>
+              </div>
+              <p class="note" id="cache-summary"></p>
+              <p class="note" id="attention-slots"></p>
+            </div>
+          </div>
+          <p class="note">
+            Bars share the GQA8 baseline scale: the same number of layers, separate K and V, eight KV heads, head dimension 128, BF16. Estimates are
+            unsharded decoder cache payload only; exclude MTP, quantization scales, page tables, unfinished compressor state, workspaces, and
+            allocator overhead. The public Python reference uses BF16 buffers while simulating quantization, so these mixed-format payload numbers are
+            not its measured GPU allocations.
+          </p>
+          <p class="source-note">
+            <a href="https://arxiv.org/html/2606.19348v1#S2.SS3.SSS4">Report &sect;2.3.4</a> reports roughly 2% of this GQA8 baseline at 1M context.
+            Separately, the model card reports Pro's single-token inference FLOPs and KV cache at 27% and 10% of DeepSeek-V3.2; that is a different
+            baseline, not a prediction from this calculator.
+          </p>
+        </section>
+
+        <section id="muon">
+          <div class="section-kicker">07 / The optimizer is part of the recipe</div>
+          <h2>Eight fast steps. Two stabilizing steps.</h2>
+          <p class="section-lede">
+            The V4 report explicitly uses hybrid Newton&ndash;Schulz orthogonalization inside every Muon update: eight iterations of the fast quintic,
+            followed by two of a convergent polynomial. This is V4's published choice, not a universal Muon default.
+          </p>
+          <div id="ns-schedule" class="ns-schedule" aria-label="Eight fast NS iterations followed by two stable iterations"></div>
+          <div class="two-col">
+            <article class="card padded">
+              <h3>Per-iteration polynomial coefficients</h3>
+              <div class="equation">X &larr; aX + b(XX<sup>T</sup>)X + c(XX<sup>T</sup>)<sup>2</sup>X</div>
+              <ul class="fact-list">
+                <li><span>Iterations 1&ndash;8</span><strong class="mono">(3.4445, -4.7750, 2.0315)</strong></li>
+                <li><span>Iterations 9&ndash;10</span><strong class="mono">(2.0, -1.5, 0.5)</strong></li>
+                <li><span>Muon momentum</span><strong>0.95 + Nesterov</strong></li>
+                <li><span>Weight decay</span><strong>0.1</strong></li>
+              </ul>
+              <p class="note">
+                A singular value s follows p(s) = as + bs<sup>3</sup> + cs<sup>5</sup>. The fast polynomial expands small values quickly but does not
+                fix s = 1. The final polynomial has p(1) = 1 and p&prime;(1) = 0.
+              </p>
+              <p class="source-note">
+                <a href="https://arxiv.org/html/2606.19348v1#S2.SS4.SSS0.Px2">Report &sect;2.4, Hybrid Newton-Schulz Iterations</a>. The schedule
+                repeats inside each optimizer update; it is not a schedule over training steps.
+              </p>
+            </article>
+            <article class="card padded">
+              <h3>Follow one normalized singular value</h3>
+              <div class="controls">
+                <label
+                  >Initial singular value s<sub>0</sub><input type="range" id="ns-initial" min="-5" max="0" step="0.05" value="-1.4" /><output
+                    id="ns-initial-value"
+                    for="ns-initial"
+                  ></output
+                ></label>
+              </div>
+              <svg id="ns-plot" class="ns-plot" viewBox="0 0 560 250" role="img" aria-label="Singular value over Newton-Schulz iterations"></svg>
+              <p class="note" id="ns-result" aria-live="polite"></p>
+              <p class="note">
+                Illustration in JavaScript scalar arithmetic, not a BF16 matrix-kernel simulation or a training-loss comparison. Very small singular
+                values may not reach 1 in ten iterations.
+              </p>
+            </article>
+          </div>
+          <div class="callout">
+            <strong>Muon needs the whole logical matrix.</strong> Sharding storage is compatible with Muon only if the distributed optimizer
+            reconstructs the required matrix view for orthogonalization. The report optimizes experts independently; a physical shard or a stack of
+            unrelated experts is not automatically the right matrix.
+          </div>
+        </section>
+
+        <section id="training">
+          <div class="section-kicker">08 / Making the model runnable</div>
+          <h2>Balance matrices, tokens, and saved tensors</h2>
+          <p class="section-lede">
+            The report's system combines expert dispatch with a hybrid ZeRO strategy for Muon. Dense matrices are assigned to bounded-size groups; MoE
+            matrices are split by expert identity so that each expert can be orthogonalized independently.
+          </p>
+          <div class="system-flow card">
+            <div class="system-step"><strong>1 / Route</strong>Token scores or hash IDs choose six experts</div>
+            <div class="system-step"><strong>2 / Dispatch</strong>Move token assignments to expert owners</div>
+            <div class="system-step"><strong>3 / Compute</strong>Expert GEMMs and local shared expert</div>
+            <div class="system-step"><strong>4 / Combine</strong>Reduce weighted expert outputs</div>
+            <div class="system-step"><strong>5 / Update</strong>Whole-matrix Muon, then restore shards</div>
+          </div>
+          <div class="reading-notes">
+            <article class="reading-note moe">
+              <h3>Dense and expert parameters have different ownership</h3>
+              <p>
+                Knapsack-style assignment balances dense matrix sizes. Experts are assigned independently, with data-parallel owners redundant only
+                where the report's hybrid ZeRO policy calls for it.
+              </p>
+            </article>
+            <article class="reading-note csa">
+              <h3>Batch equal-shaped NS work</h3>
+              <p>
+                The report merges consecutive same-shaped matrices into batched Newton&ndash;Schulz computations. This improves utilization without
+                making those matrices a single larger orthogonalization problem.
+              </p>
+            </article>
+            <article class="reading-note swa">
+              <h3>Low-precision communication still needs accurate reduction</h3>
+              <p>
+                MoE gradients are stochastically rounded to BF16 for communication. The report uses all-to-all exchange and a local FP32 sum to avoid
+                low-precision collective accumulation errors.
+              </p>
+            </article>
+            <article class="reading-note mhc">
+              <h3>Checkpoint tensor dependencies, not just modules</h3>
+              <p>
+                Tensor-level checkpointing, fused MoE kernels, and recomputed mHC intermediates reduce saved activation memory. The diagram's
+                checkpoint option illustrates dependencies, not a measured peak-memory budget.
+              </p>
+            </article>
+          </div>
+          <p class="source-note">
+            <a href="https://arxiv.org/html/2606.19348v1#S3.SS4">Report &sect;3.4</a>: efficient Muon, mHC, long-context communication, and extended
+            automatic differentiation.
+          </p>
+        </section>
+
+        <section id="sources" class="sources">
+          <h2>Sources and scope</h2>
+          <ol>
+            <li>
+              <a href="https://huggingface.co/deepseek-ai/DeepSeek-V4-Pro">DeepSeek V4 Pro model card</a>: reported model sizes, context, releases,
+              precision and reasoning modes.
+            </li>
+            <li>
+              <a href="https://arxiv.org/abs/2606.19348">DeepSeek-V4 technical report</a>,
+              <a href="https://arxiv.org/html/2606.19348v1">HTML version</a>: mHC, CSA/HCA, hybrid Muon and training infrastructure.
+            </li>
+            <li>
+              Released <a href="https://huggingface.co/deepseek-ai/DeepSeek-V4-Pro/blob/main/config.json">Pro configuration</a> and
+              <a href="https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash/blob/main/config.json">Flash configuration</a>: exact layer maps and
+              dimensions, checked October 26, 2026.
+            </li>
+            <li>
+              <a href="https://huggingface.co/deepseek-ai/DeepSeek-V4-Pro/blob/main/inference/model.py">Reference inference implementation</a>:
+              projection shapes, shared K/V, hash routing, compressor state, mHC and MTP weight sharing.
+            </li>
+          </ol>
+          <p>
+            The formulas are educational reconstructions, not measured throughput, training convergence, or memory requirements for a specific
+            deployment. Parallelism, padding, quantization metadata, fusion and checkpoint policies change physical ownership and allocations.
+          </p>
+          <nav class="series-footer" aria-label="Related studies">
+            <a href="./kimi-k3.html">Related: Kimi K3 architecture &rarr;</a
+            ><a href="./deepseek-v4-1-flash.html">Next generation: DeepSeek V4.1 Flash &rarr;</a>
+          </nav>
+        </section>
+      </main>
+    </div>
+  </body>
+</html>
