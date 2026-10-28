@@ -5,4 +5,4 @@ inline: true
 related_posts: false
 ---
 
-A new preprint on a decentralized method [GT-NSGDm](https://arxiv.org/abs/2505.03736) that achieves optimal convergence under heavy-tailed gradient noise. 
+A new preprint on a decentralized method [GT-NSGDm](https://arxiv.org/abs/2505.03736) that achieves optimal convergence under heavy-tailed gradient noise.

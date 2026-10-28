@@ -5,4 +5,4 @@ inline: true
 related_posts: false
 ---
 
-A paper on the high-probability convergence of a general framework for [nonlinear SGD](https://arxiv.org/abs/2410.13954) under heavy-tailed gradient noise has been accepted to AISTATS 2025. 
+A paper on the high-probability convergence of a general framework for [nonlinear SGD](https://arxiv.org/abs/2410.13954) under heavy-tailed gradient noise has been accepted to AISTATS 2025.
