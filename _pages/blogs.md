@@ -9,6 +9,9 @@ studies:
   - title: Kimi K3
     url: /studies/kimi-k3.html
     description: KDA and MLA attention, Attention Residuals, and Stable LatentMoE.
+  - title: DeepSeek V4
+    url: /studies/deepseek-v4.html
+    description: CSA and HCA attention, mHC residual mixing, MoE routing, and distributed Muon.
   - title: DeepSeek V4.1 Flash
     url: /studies/deepseek-v4-1-flash.html
     description: CSA2 sparse attention, shared KV memory, the causal encoder and decoder, and Engram.
