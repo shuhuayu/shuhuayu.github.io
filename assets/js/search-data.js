@@ -16,6 +16,13 @@ ninja.data = [{
           handler: () => {
             window.location.href = "/publications/";
           },
+        },{id: "nav-blogs",
+          title: "blogs",
+          description: "Notes and interactive diagrams on model architecture, memory, and training.",
+          section: "Navigation",
+          handler: () => {
+            window.location.href = "/blogs/";
+          },
         },{id: "post-a-post-with-image-galleries",
       
         title: "a post with image galleries",
