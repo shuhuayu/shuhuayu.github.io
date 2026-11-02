@@ -216,18 +216,19 @@ test("KDA core includes the reference's recurrent and intra-chunk contractions",
   assert.equal(R.calculate({ kdaChunk: 128 }).conventionPerToken, x.conventionPerToken);
 });
 
-test("the headline is a compute-only hardware/configuration ceiling, not measured throughput", () => {
+test("compute service and recipe throughput are derived from hardware and configuration, not measurements", () => {
   const x = R.calculate();
   assert.equal(x.tokensPerGPUUpdate, 32768);
   close(x.computeTokensPerSecondPerGPU, x.globalTokens / (512 * x.computeSeconds));
   close(x.computeModelTFLOPsPerGPU, (x.computeTokensPerSecondPerGPU * x.conventionPerToken) / 1e12);
   close(x.resourceTokensPerSecondPerGPU, x.globalTokens / (512 * x.sketchSeconds));
+  close(x.resourceModelTFLOPsPerGPU, (x.resourceTokensPerSecondPerGPU * x.conventionPerToken) / 1e12);
   assert.ok(x.computeTokensPerSecondPerGPU > x.resourceTokensPerSecondPerGPU);
   const source = readFileSync(join(__dirname, "..", "kimi-k3-roofline-model.js"), "utf8");
   assert.doesNotMatch(source, /throughput:\s*(?:370|372|297)|FakePG/);
 });
 
-test("backend metadata, topology and communication policy cannot change the compute headline", () => {
+test("backend metadata, topology and communication policy change recipe constraints, not compute work", () => {
   const x = R.calculate();
   assert.equal(x.metadataRounds, 0);
   assert.ok(x.stages.every((stage) => stage.traffic.find((item) => item.key === "metadata").nvl === 0));
@@ -283,17 +284,57 @@ test("forward, DGRAD and WGRAD have their own shapes and output-byte budgets", (
   assert.equal(head.precision, "BF16");
 });
 
-test("every calculator input exists and the static headline agrees with its analytic default", () => {
+test("every calculator input exists and recipe-specific results agree with the default", () => {
   const html = readFileSync(join(__dirname, "..", "kimi-k3-roofline.html"), "utf8");
   for (const key of Object.keys(R.defaults)) assert.ok(html.includes(`id="roof-${key}"`), key);
-  const headline = html.match(/<strong id="headline-compute">([^<]+)<\/strong>/)[1];
-  assert.equal(headline, `${R.calculate().computeTokensPerSecondPerGPU.toLocaleString("en-US", { maximumFractionDigits: 0 })} tok/s/GPU`);
+  const x = R.calculate();
+  const throughput = html.match(/<td id="roof-recipe-throughput">([^<]+)<\/td>/)[1];
+  const tflops = html.match(/<td id="roof-recipe-tflops">([^<]+)<\/td>/)[1];
+  assert.equal(throughput, `${x.resourceTokensPerSecondPerGPU.toLocaleString("en-US", { maximumFractionDigits: 0 })} tokens/s/GPU`);
+  assert.equal(tflops, `${x.resourceModelTFLOPsPerGPU.toLocaleString("en-US", { maximumFractionDigits: 1 })} model TFLOP/s/GPU`);
+  const header = html.match(/<header>([\s\S]*?)<\/header>/)[1];
+  assert.doesNotMatch(header, /headline-|tokens\/s|TFLOP|TF\/s/);
+  assert.doesNotMatch(html, /id="headline-/);
+  assert.match(html, /Default analyzed recipe: 512 GB200 GPUs/);
+  assert.match(html, /Roofline for the configured recipe/);
   assert.match(html, /Historical measurements: comparison only, not the roofline/);
   assert.match(html, /https:\/\/deepseek-v3\.ezyang\.com\/studies\/kimi-k3\.html/);
 });
 
+test("configurable GPU counts conserve per-token work and derive the actual mesh and global batch", () => {
+  for (const world of [128, 256, 512, 1024]) {
+    const x = R.calculate({ world, pp: 4, ep: 32, mbs: 32, domain: Math.min(64, world / 4) });
+    assert.equal(x.config.world, world);
+    assert.equal(x.stageRanks, world / 4);
+    assert.equal(x.dp, world / 4);
+    assert.equal(x.expertFsdp, world / 4 / 32);
+    assert.equal(x.globalTokens, x.dp * 32 * 4096);
+    assert.equal(x.tokensPerGPUUpdate, x.globalTokens / world);
+    close(
+      x.causalModelFlops / x.globalTokens,
+      R.calculate({ pp: 4, ep: 32, mbs: 32 }).causalModelFlops / R.calculate({ pp: 4, ep: 32, mbs: 32 }).globalTokens
+    );
+    close(x.resourceTokensPerSecondPerGPU, x.globalTokens / (world * x.sketchSeconds));
+    close(x.resourceModelTFLOPsPerGPU, (x.resourceTokensPerSecondPerGPU * x.conventionPerToken) / 1e12);
+  }
+});
+
+test("a communication bottleneck lowers the configured recipe's throughput and model TFLOP/s", () => {
+  const base = R.calculate();
+  const slowNetwork = R.calculate({ domain: 8, network: 5, routingMap: "hybridep" });
+  assert.equal(base.computeSeconds, slowNetwork.computeSeconds);
+  assert.ok(slowNetwork.networkSeconds > slowNetwork.computeSeconds);
+  assert.equal(slowNetwork.resourceSeconds, slowNetwork.networkSeconds);
+  assert.ok(slowNetwork.resourceTokensPerSecondPerGPU < base.resourceTokensPerSecondPerGPU);
+  assert.ok(slowNetwork.resourceModelTFLOPsPerGPU < base.resourceModelTFLOPsPerGPU);
+});
+
 test("invalid user-facing accounting inputs fail explicitly", () => {
   for (const config of [
+    { world: 0 },
+    { world: -1 },
+    { world: 255 },
+    { world: 64 },
     { pp: 3 },
     { pp: 3.2 },
     { pp: 0 },
