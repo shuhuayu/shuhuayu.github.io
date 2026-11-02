@@ -124,7 +124,65 @@
     });
   }
 
-  const api = Object.freeze({ spec, layers, layer, work, cache, engram, recentNgrams });
+  function attentionExample(mode = "Reuse") {
+    if (!["Full", "Reindex", "Reuse"].includes(mode)) throw new RangeError("Unknown CSA2 mode");
+    // Reduced sizes and invented scores illustrate the decoder's inference search.
+    const currentPosition = 25;
+    const blockSize = 4;
+    const numCandidateBlocks = 3;
+    const topK = 3;
+    const fullScores = [
+      0.32, 0.94, 0.44, 0.21, 0.48, 0.36, 0.62, 0.19, 0.78, 0.82, 0.23, 0.14, 0.75, 0.27, 0.15, 0.3, 0.9, 0.67, 0.52, 0.4, 0.56, 0.98, 0.8, 0.2, 0.66,
+      0.95, 0.84, 0.99, 0.72, 0.83, 0.6, 0.51,
+    ];
+    const reindexScores = [
+      0.99, 0.11, 0.44, 0.2, 0.4, 0.5, 0.6, 0.3, 0.35, 0.999, 0.8, 0.7, 0.6, 0.4, 0.3, 0.2, 0.28, 0.97, 0.6, 0.2, 0.1, 0.3, 0.95, 0.5, 0.77, 0.85,
+      0.88, 0.999, 0.8, 0.6, 0.5, 0.4,
+    ];
+    const visible = Array.from({ length: currentPosition }, (_, index) => index);
+    const rank = (positions, scores) => [...positions].sort((a, b) => scores[b] - scores[a] || a - b);
+    const blocks = Array.from({ length: Math.ceil(fullScores.length / blockSize) }, (_, index) => {
+      const positions = visible.filter((position) => Math.floor(position / blockSize) === index);
+      return { index, positions, score: positions.length ? Math.max(...positions.map((position) => fullScores[position])) : -Infinity };
+    });
+    const candidateBlocks = [...blocks]
+      .filter((block) => block.positions.length)
+      .sort((a, b) => b.score - a.score || a.index - b.index)
+      .slice(0, numCandidateBlocks)
+      .map((block) => block.index);
+    const candidates = visible.filter((position) => candidateBlocks.includes(Math.floor(position / blockSize)));
+    const selected = rank(mode === "Full" ? visible : candidates, mode === "Full" ? fullScores : reindexScores).slice(0, topK);
+    const scored = mode === "Full" ? visible : mode === "Reindex" ? candidates : [];
+    return {
+      currentPosition,
+      blockSize,
+      numCandidateBlocks,
+      topK,
+      kvOwner: 21,
+      indexOwner: mode === "Full" ? 21 : 29,
+      memoryEntries: currentPosition,
+      selected: selected.map((position) => position + 1).sort((a, b) => a - b),
+      scoredPositions: scored.map((position) => position + 1),
+      candidatePositions: candidates.map((position) => position + 1),
+      positions: fullScores.map((_, index) => ({
+        position: index + 1,
+        block: Math.floor(index / blockSize) + 1,
+        visible: index < currentPosition,
+        candidate: candidates.includes(index),
+        selected: selected.includes(index),
+        score: scored.includes(index) ? (mode === "Full" ? fullScores[index] : reindexScores[index]) : null,
+      })),
+    };
+  }
+
+  function boundedSwiGLU(gate, up) {
+    const boundedGate = Math.min(gate, 10);
+    const boundedUp = Math.max(-10, Math.min(up, 10));
+    const siluGate = boundedGate / (1 + Math.exp(-boundedGate));
+    return { gate: boundedGate, up: boundedUp, siluGate, product: siluGate * boundedUp };
+  }
+
+  const api = Object.freeze({ spec, layers, layer, work, cache, engram, recentNgrams, attentionExample, boundedSwiGLU });
   if (typeof module === "object" && module.exports) module.exports = api;
   else root.DeepSeekV41 = api;
 })(typeof globalThis === "object" ? globalThis : this);

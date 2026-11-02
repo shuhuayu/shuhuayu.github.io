@@ -20,6 +20,8 @@
   let selectedLayer = 29;
   let selectedOperation = "global_shared";
   let operationMap = new Map();
+  let flowView = "overview";
+  let ownershipView = "backward";
 
   const node = (id, title, shape, options = {}) => ({
     id,
@@ -371,7 +373,7 @@
               code: "Block.forward / hc_ffn_fn / ffn_norm",
               params: 4 * D * 24 + 27 + D,
               weights: "[24, 20480] coefficient matrix + scales + [5120] norm",
-              info: "Use A predicted by the attention sublayer for the FFN input mix. Predict new FFN coefficients; its A will feed the next block.",
+              info: "Use A predicted by the attention sublayer for the FFN input mix. Predict new FFN coefficients; its A feeds the next block or the final head merge.",
               backward: "Residual streams, attention-produced A, FFN coefficient projection inputs, and norm intermediates.",
             }),
           ],
@@ -413,23 +415,24 @@
             projection("expert_up", "Routed gate + up GEMMs", "[R, 4608]", D, 2 * S.expertDim, {
               params: S.experts * 2 * D * S.expertDim,
               weights: "384 × 2 × [2304, 5120]",
-              code: "MLP.w1 / w3",
+              code: "Expert.w1 / w3",
               precision: "FP4 routed weights with block scales; logical activation path",
               info: "The parameter label counts the full bank. Each token executes only six experts, producing two 2304-channel branches per assignment.",
               backward: "Dispatched inputs, selected expert weights, and gate/up activations.",
             }),
-            node("expert_act", "Clamped SwiGLU", "[R, 2304]", {
-              code: "MLP.forward",
-              info: "Clamp according to the model's limit of 10, apply SiLU to the gate, and multiply by the up branch.",
-              backward: "Gate and up values and clamp/activation intermediates.",
+            node("expert_act", "Bounded SwiGLU / limit 10", "[R, 2304]", {
+              code: "Expert.forward",
+              precision: "FP32 clamp, SiLU, product, and routed weighting; cast to the input dtype before the down GEMM",
+              info: "Cap the gate at +10 only, bound the up branch to [-10, +10], and multiply ordinary SiLU(gate) by up. Negative gate values are not lower-clamped. Routed experts apply their selected weight before the cast and down projection.",
+              backward: "Gate and up values, clamp/activation intermediates, and selected routing weights.",
             }),
             projection("expert_down", "Routed down GEMMs", "[R, 5120]", S.expertDim, D, {
               params: S.experts * S.expertDim * D,
               weights: "384 × [5120, 2304]",
-              code: "MLP.w2",
+              code: "Expert.w2",
               precision: "FP4 routed weights with block scales",
-              info: "Return each routed assignment to model width before weighted combination.",
-              backward: "SwiGLU products and selected down weights.",
+              info: "Project already-weighted SwiGLU products back to model width. The reference applies routing weights before this GEMM's input cast.",
+              backward: "Weighted SwiGLU products and selected down weights.",
             }),
           ],
         },
@@ -447,17 +450,19 @@
           ],
         },
       ],
-      junction: "Combine the routed results using their selected weights, and add the shared expert.",
+      junction: "Sum the already-weighted routed results by token, and add the shared expert.",
       tail: [
         node("combine", "Weighted expert combine", "[T, 5120]", {
           kind: "comm",
           code: "MoE.forward / expert combine",
-          info: "Return routed outputs to their token positions, sum the six weighted contributions, and add the shared path.",
-          backward: "Expert outputs, route metadata, and mixture weights; gradients flow into expert outputs and routing weights.",
+          precision: "FP32 routed-output accumulation and shared-path addition; restore the input dtype",
+          info: "Return already-weighted routed outputs to their token positions, sum the six contributions, and add the shared path.",
+          backward:
+            "Token/expert metadata for reverse combine. Routing-weight gradients flow through the weighted SwiGLU products inside the experts.",
         }),
         node("ffn_merge", "mHC merge / carry A to next block", "[T, 4, 5120] + next input mix [T, 4]", {
           code: "hc_post / Block.forward return",
-          info: "Combine the dense FFN output with the four residual streams. Return the FFN's A coefficients for the following block.",
+          info: "Combine the dense FFN output with the four residual streams. Return the FFN's A coefficients for the following block or final head merge.",
           backward: "Residual and FFN outputs, current B/C, and the carried A dependency into the next block.",
         }),
       ],
@@ -478,7 +483,233 @@
       <dt>Reference path</dt><dd><code>${escape(op.code)}</code></dd>
       <dt>Backward dependencies</dt><dd>${escape(op.backward)}</dd></dl>
       <p class="note">Shared cache size and owned weight count are separate. Training needs saved intermediates or their recomputation.</p>
-      <a class="note" href="#operation-${op.id}">Back to this operation &uarr;</a>`;
+      <a class="note" href="${flowView === "overview" ? "#flow-overview" : "#operation-" + op.id}">${
+        flowView === "overview" ? "Back to the block overview" : "Back to this operation"
+      } &uarr;</a>`;
+  }
+
+  function renderOverview(layer) {
+    const previous = layer.index ? `Layer ${layer.number - 1} output` : "Token embeddings";
+    const streams = '<span class="stream-lanes"><i>s1</i><i>s2</i><i>s3</i><i>s4</i></span>';
+    const block = (id, operation, title, lines, kind = "dense", fourStreams = false) =>
+      `<button type="button" class="block-node ${kind}${
+        operation === selectedOperation ? " selected" : ""
+      }" data-block-node="${id}" data-operation="${operation}" aria-pressed="${operation === selectedOperation}">
+        <strong>${escape(title)}</strong>${fourStreams ? streams : ""}${lines.map((line) => `<small>${escape(line)}</small>`).join("")}</button>`;
+    const ownGlobal = layer.mode === "Full";
+    const ownSelection = ["Full", "Reindex"].includes(layer.mode);
+    const globalOwner = layer.ratio ? `L${layer.kvSource + 1}` : "None";
+    const source = layer.half === "Decoder" ? "encoder output H20" : `H${layer.kvSource}`;
+    const roles = [
+      ["Main Q", "New", true],
+      ["Local KV", "New", true],
+      ["Global KV", layer.ratio ? (ownGlobal ? "New" : "Read shared") : "Unused", ownGlobal],
+      ["Indexer K", layer.ratio ? (ownGlobal ? "New" : layer.mode === "Reindex" ? "Read shared" : "No indexing") : "Unused", ownGlobal],
+      ["Top-K IDs", layer.ratio ? (ownSelection ? "New selection" : "Read shared") : "Unused", ownSelection],
+    ];
+    byId("flow-overview").innerHTML = `<div class="block-heading"><div><span class="label">Text-token path / T = ${integer(
+      Number(byId("flow-tokens").value)
+    )}</span>
+      <h3>Layer ${layer.number} / ${layer.half} ${layer.mode}</h3></div>
+      <div class="mode-presets" role="group" aria-label="Compare decoder attention modes">${[
+        [20, "Full / L21"],
+        [28, "Reindex / L29"],
+        [29, "Reuse / L30"],
+      ]
+        .map(([index, label]) => `<button type="button" data-example-layer="${index}" aria-pressed="${index === layer.index}">${label}</button>`)
+        .join("")}</div></div>
+      <div class="responsibility-strip" aria-label="What this layer computes">${roles
+        .map(
+          ([title, action, fresh]) =>
+            `<div class="${
+              fresh ? "fresh" : ["Unused", "No indexing"].includes(action) ? "unused" : "shared"
+            }"><strong>${title}</strong><span>${action}</span></div>`
+        )
+        .join("")}</div>
+      <div class="block-legend"><span><i class="state-edge"></i> Sequential hidden state</span><span><i class="residual-edge"></i> Four residual bypasses</span>
+      <span><i class="memory-edge"></i> Memory / selected-position input</span></div>
+      <div class="block-canvas" role="group" aria-label="Layer ${layer.number} hidden-state path and attached attention sources">
+        <svg class="block-connectors" aria-hidden="true"></svg>
+        ${block("incoming", "input_mix", previous, ["Four residual streams / [T, 4, 5120]"], "state", true)}
+        ${block("attn_mix", "input_mix", "mHC attention input", ["Carried A mixes the four streams", "RMSNorm -> dense [T, 5120]"], "mix")}
+        ${block("query", "q_expand", `Main query / L${layer.number}`, ["NEW in every layer", "64 heads x 512 channels"], "query")}
+        ${block(
+          "attention",
+          "attention",
+          layer.ratio ? "Sparse attention + sink" : "Local attention + sink",
+          [layer.ratio ? "Own Q + local KV + selected global KV" : "Own Q + own local KV", "Grouped output -> [T, 5120]"],
+          "attention"
+        )}
+        ${block("attn_merge", "attention_merge", "mHC attention merge", ["B mixes residuals; C adds attention output"], "merge", true)}
+        ${block("ffn_mix", "ffn_mix", "mHC feed-forward input", ["Uses A predicted by attention sublayer", "RMSNorm -> dense [T, 5120]"], "mix")}
+        ${block("moe", "router", "MoE / 6 routed + 1 shared", ["Choose from 384 routed experts", "Bounded SwiGLU -> weighted combine"], "moe")}
+        ${block("ffn_merge", "ffn_merge", "mHC feed-forward merge", ["B mixes residuals; C adds MoE output"], "merge", true)}
+        ${block(
+          "outgoing",
+          "ffn_merge",
+          `Layer ${layer.number} output`,
+          [layer.number === S.numLayers ? "Four streams + carried A for the final head" : "Four streams + carried A for the next block"],
+          "state",
+          true
+        )}
+        ${block("local", "local_project", `Local KV / L${layer.number}`, ["NEW from this layer's dense input", "Own 128-position window"], "local")}
+        ${
+          layer.ratio
+            ? block(
+                "global",
+                ownGlobal ? "global_project" : "global_shared",
+                `Global KV / ${globalOwner}`,
+                [
+                  `${ownGlobal ? "BUILD here" : "READ shared"} from ${source}`,
+                  `Source -> ${globalOwner} projection -> global KV`,
+                  "Indexer K is stored alongside main KV",
+                  `One entry per ${layer.ratio === 2 ? "completed token pair" : "token"}`,
+                ],
+                "memory"
+              ) +
+              block(
+                "selection",
+                ownSelection ? "index_select" : "indices_shared",
+                `Position IDs / L${layer.indexSource + 1}`,
+                [
+                  ownSelection ? "NEW: own indexer query + Top-512" : "READ: reuse Top-512; no indexer query",
+                  ownSelection ? `Reads indexer K owned by ${globalOwner}` : "No indexer K scoring in this layer",
+                  layer.mode === "Reindex"
+                    ? "Search L21's candidate pool"
+                    : ownSelection
+                      ? "Search visible global memory"
+                      : "Main attention still uses a fresh Q",
+                ],
+                "selection"
+              )
+            : '<div class="block-local-note"><strong>Local-only layer</strong><p>No global memory or sparse selection in L1 and L2.</p></div>'
+        }
+        <div class="block-coefficient-note"><strong>Coefficients predicted alongside the dense path</strong>
+          <p>Each sublayer predicts B/C for its own merge and A for the following sublayer. The input mix shown at its entrance is already carried in.</p>
+          <a href="#mhc">Open Single-Pass mHC &rarr;</a></div>
+        <div class="component-insets"><span class="label">Open a component</span><a href="#expert">SwiGLU expert &rarr;</a><a href="#fp4">FP4 cache &rarr;</a>
+          <a href="#vision">Vision &rarr;</a><a href="#dspark">DSpark &rarr;</a></div>
+        ${
+          layer.hasEngram
+            ? block(
+                "engram",
+                "engram_gate",
+                `Engram / L${layer.number}`,
+                ["Token groups -> rows -> projection", "Text-token gate + addition before mHC"],
+                "engram"
+              )
+            : ""
+        }
+      </div>
+      <p class="note block-summary">${
+        layer.ratio
+          ? `L${
+              layer.number
+            } receives ${previous.toLowerCase()}, computes its own query and local KV, and reads global KV owned by ${globalOwner}. ` +
+            (ownSelection ? "This layer computes fresh selected positions." : `Selected positions were computed by L${layer.indexSource + 1}.`)
+          : `L${layer.number} receives ${previous.toLowerCase()} and computes its own query and local KV.`
+      }${layer.hasEngram ? " Engram first updates the incoming four streams." : ""}</p>
+      <p class="note">Select a box for shapes, weights, precision, and backward dependencies. The tensor view expands each operation group.</p>`;
+    requestAnimationFrame(drawBlockConnectors);
+  }
+
+  function drawBlockConnectors() {
+    if (flowView !== "overview") return;
+    const canvas = byId("flow-overview").querySelector(".block-canvas");
+    const bounds = canvas.getBoundingClientRect();
+    const svg = canvas.querySelector("svg");
+    svg.setAttribute("viewBox", `0 0 ${bounds.width} ${bounds.height}`);
+    const boxes = new Map(
+      [...canvas.querySelectorAll("[data-block-node]")].map((element) => {
+        const rect = element.getBoundingClientRect();
+        return [
+          element.dataset.blockNode,
+          {
+            left: rect.left - bounds.left,
+            right: rect.right - bounds.left,
+            top: rect.top - bounds.top,
+            bottom: rect.bottom - bounds.top,
+            x: rect.left - bounds.left + rect.width / 2,
+            y: rect.top - bounds.top + rect.height / 2,
+          },
+        ];
+      })
+    );
+    const colors = { state: "ink", residual: "residual", local: "encoder", global: "decoder", selection: "gold", engram: "gold" };
+    const paths = [];
+    const edge = (path, kind, dashed = false) =>
+      paths.push(`<path d="${path}" class="block-edge edge-${kind}${dashed ? " dashed" : ""}" marker-end="url(#block-arrow-${kind})"/>`);
+    const chain = ["incoming", "attn_mix", "query", "attention", "attn_merge", "ffn_mix", "moe", "ffn_merge", "outgoing"];
+    for (let index = 0; index < chain.length - 1; index++) {
+      const a = boxes.get(chain[index]);
+      const b = boxes.get(chain[index + 1]);
+      edge(`M${a.x},${a.bottom} L${b.x},${b.top - 3}`, "state");
+    }
+    for (const [from, to, startOffset] of [
+      ["incoming", "attn_merge", -12],
+      ["attn_merge", "ffn_merge", 15],
+    ]) {
+      const a = boxes.get(from);
+      const b = boxes.get(to);
+      for (let index = 0; index < 4; index++) {
+        const rail = 8 + index * 8;
+        const start = a.y + startOffset + index * 7;
+        const end = b.y - 14 + index * 7;
+        edge(`M${a.left},${start} H${rail} V${end} H${b.left - 3}`, "residual");
+      }
+    }
+    const input = boxes.get("attn_mix");
+    const local = boxes.get("local");
+    const attention = boxes.get("attention");
+    const gap = local.left - input.right;
+    const lane = (fraction) => input.right + gap * fraction;
+    edge(`M${input.right},${input.y} H${lane(0.2)} V${local.y - 12} H${local.left - 3}`, "local");
+    edge(`M${local.left},${local.y + 12} H${lane(0.4)} V${attention.top + 18} H${attention.right + 3}`, "local");
+    if (boxes.has("global")) {
+      const global = boxes.get("global");
+      edge(`M${global.left},${global.y} H${lane(0.55)} V${attention.y} H${attention.right + 3}`, "global", true);
+      const selection = boxes.get("selection");
+      edge(`M${selection.left},${selection.y} H${lane(0.75)} V${attention.bottom - 18} H${attention.right + 3}`, "selection", true);
+      if (["Full", "Reindex"].includes(M.layer(selectedLayer).mode)) {
+        edge(`M${input.right},${input.y + 12} H${lane(0.92)} V${selection.y - 15} H${selection.left - 3}`, "local");
+        edge(`M${global.x},${global.bottom} L${selection.x},${selection.top - 3}`, "selection");
+      }
+    }
+    if (boxes.has("engram")) {
+      const engram = boxes.get("engram");
+      const incoming = boxes.get("incoming");
+      edge(`M${engram.left},${engram.y} H${lane(0.6)} V${incoming.y} H${incoming.right + 3}`, "engram", true);
+    }
+    svg.innerHTML = `<defs>${Object.entries(colors)
+      .map(
+        ([kind, color]) =>
+          `<marker id="block-arrow-${kind}" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 Z" fill="var(--${color})"/></marker>`
+      )
+      .join("")}</defs>${paths.join("")}`;
+  }
+
+  function setFlowView(view) {
+    flowView = view;
+    byId("flow-layout").classList.toggle("overview", view === "overview");
+    byId("flow-overview").hidden = view !== "overview";
+    byId("flow-diagram").hidden = view !== "details";
+    for (const button of document.querySelectorAll("[data-flow-view]")) button.setAttribute("aria-pressed", String(button.dataset.flowView === view));
+    renderInspector();
+    if (view === "overview") requestAnimationFrame(drawBlockConnectors);
+  }
+
+  function selectOperation(operation, scroll = true) {
+    selectedOperation = operation;
+    for (const button of byId("flow-layout").querySelectorAll("[data-operation]")) {
+      const selected = button.dataset.operation === operation;
+      button.classList.toggle("selected", selected);
+      button.setAttribute("aria-pressed", String(selected));
+    }
+    renderInspector();
+    if (scroll) {
+      byId("flow-inspector").focus({ preventScroll: true });
+      byId("flow-inspector").scrollIntoView({ block: "start" });
+    }
   }
 
   function renderGraph() {
@@ -515,7 +746,8 @@
         ${stage.tail ? `<div class="flow-single">${chain(stage.tail)}</div>` : ""}
       </div>`
         )
-        .join("")}`;
+        .join('<div class="stage-connector" aria-hidden="true">&darr;</div>')}`;
+    renderOverview(layer);
     renderInspector();
   }
 
@@ -576,17 +808,16 @@
     });
     byId("flow-layer").addEventListener("change", (event) => selectLayer(Number(event.target.value)));
     for (const id of ["flow-tokens", "flow-lens"]) byId(id).addEventListener("change", renderGraph);
-    byId("flow-diagram").addEventListener("click", (event) => {
+    byId("flow-layout").addEventListener("click", (event) => {
+      const preset = event.target.closest("[data-example-layer]");
+      if (preset) {
+        selectLayer(Number(preset.dataset.exampleLayer));
+        byId("flow-overview").querySelector(`[data-example-layer="${selectedLayer}"]`).focus({ preventScroll: true });
+        return;
+      }
       const button = event.target.closest("[data-operation]");
       if (!button) return;
-      selectedOperation = button.dataset.operation;
-      for (const item of byId("flow-diagram").querySelectorAll("[data-operation]")) {
-        const selected = item.dataset.operation === selectedOperation;
-        item.classList.toggle("selected", selected);
-        item.setAttribute("aria-pressed", String(selected));
-      }
-      renderInspector();
-      if (window.matchMedia("(max-width: 760px)").matches) byId("flow-inspector").scrollIntoView({ block: "start" });
+      selectOperation(button.dataset.operation, flowView === "overview" || window.matchMedia("(max-width: 760px)").matches);
     });
     selectLayer(selectedLayer);
   }
@@ -595,6 +826,14 @@
     const tokens = contexts[Number(byId("ced-context").value)];
     const phase = byId("ced-phase").value;
     const w = M.work(tokens, phase);
+    for (const card of document.querySelectorAll("[data-execution]")) {
+      const selected = card.dataset.execution === phase;
+      card.classList.toggle("selected", selected);
+      card.setAttribute("aria-pressed", String(selected));
+    }
+    byId("execution-prefill-encoder").textContent = `All ${integer(tokens)} positions`;
+    byId("execution-prefill-decoder").textContent = `Last ${integer(Math.min(tokens, S.window))} positions`;
+    for (const half of ["encoder", "decoder"]) byId(`execution-training-${half}`).textContent = `All ${integer(tokens)} positions`;
     byId("ced-context-label").textContent = `${integer(tokens)} tokens`;
     byId("ced-context").setAttribute("aria-valuetext", `${integer(tokens)} tokens`);
     byId("ced-work-fraction").textContent = `${(100 * w.fraction).toFixed(1)}%`;
@@ -681,6 +920,157 @@
     byId("engram-gate-result").textContent = `Updated stream = H + ${gate.toFixed(2)} × V`;
   }
 
+  function renderSelection() {
+    const mode = byId("selection-mode").value;
+    const example = M.attentionExample(mode);
+    const blocks = Array.from({ length: example.positions.length / example.blockSize }, (_, index) =>
+      example.positions.slice(index * example.blockSize, (index + 1) * example.blockSize)
+    );
+    byId("selection-grid").innerHTML = blocks
+      .map(
+        (positions, index) => `<div class="selection-block${positions.some((position) => position.candidate) ? " candidate" : ""}">
+          <span class="label">Block ${index + 1}</span><ol>${positions
+            .map((position) => {
+              const label = !position.visible ? "Future" : position.score !== null ? position.score.toFixed(2) : position.selected ? "ID" : "-";
+              const scoreDescription = !position.visible
+                ? "causally masked"
+                : position.score !== null
+                  ? "indexer score " + label
+                  : mode === "Reuse"
+                    ? "no new indexer score"
+                    : "not scored";
+              return `<li value="${position.position}" class="position-cell${position.selected ? " selected" : ""}${
+                !position.visible ? " future" : ""
+              }${position.position === example.currentPosition ? " current" : ""}" aria-label="Position ${position.position}, ${
+                position.selected ? "selected, " : ""
+              }${position.candidate ? "in candidate pool, " : ""}${scoreDescription}">
+                <strong>${position.position}</strong><small>${label}</small></li>`;
+            })
+            .join("")}</ol></div>`
+      )
+      .join("");
+    const layer = { Full: 21, Reindex: 29, Reuse: 30 }[mode];
+    const descriptions = {
+      Full: "L21 builds the 1:1 global store from H20. Its indexer searches all 25 visible entries, selects three positions, and builds the candidate pool.",
+      Reindex:
+        "L29 reads L21's global KV and indexer K. Its own indexer query rescores the 12 candidate positions and selects a new three-position set.",
+      Reuse:
+        "L30 reads L21's global KV and L29's position IDs. It performs no new indexer query or scoring. Its own main query computes fresh attention.",
+    };
+    byId("selection-readout").innerHTML = `<div class="selection-metrics">
+      <div><strong>${example.memoryEntries}</strong><span>stored visible global entries / L21</span></div>
+      <div><strong>${example.scoredPositions.length}</strong><span>indexer positions scored by L${layer}</span></div>
+      <div><strong>${example.topK}</strong><span>global positions read by main attention</span></div></div>
+      <p>${descriptions[mode]}</p><div class="formula">KV21 at [${example.selected.join(
+        ", "
+      )}] + local KV${layer} + own Q${layer} + sink &rarr; attention</div>`;
+  }
+
+  function renderSwiGLU() {
+    const gate = Number(byId("swiglu-gate").value);
+    const up = Number(byId("swiglu-up").value);
+    const value = M.boundedSwiGLU(gate, up);
+    const scalar = (number) => (number && Math.abs(number) < 0.01 ? number.toPrecision(4) : number.toFixed(4));
+    for (const [name, raw] of [
+      ["gate", gate],
+      ["up", up],
+    ]) {
+      byId(`swiglu-${name}-label`).textContent = raw.toFixed(1);
+      byId(`swiglu-${name}`).setAttribute("aria-valuetext", raw.toFixed(1));
+    }
+    byId("swiglu-result").innerHTML = `g: ${gate.toFixed(1)} &rarr; ${value.gate.toFixed(1)}<br />u: ${up.toFixed(1)} &rarr; ${value.up.toFixed(
+      1
+    )}<br />
+      SiLU(g) = ${scalar(value.siluGate)}<br />activation product = ${scalar(value.product)}`;
+    const x = (input) => 44 + ((input + 20) / 40) * 480;
+    const y = (output) => 208 - ((output + 1) / 22) * 164;
+    const points = Array.from({ length: 161 }, (_, index) => -20 + index / 4);
+    const curve = (bounded) =>
+      points
+        .map(
+          (input, index) =>
+            `${index ? "L" : "M"}${x(input).toFixed(2)},${y(bounded ? M.boundedSwiGLU(input, 1).siluGate : input / (1 + Math.exp(-input))).toFixed(
+              2
+            )}`
+        )
+        .join(" ");
+    byId("swiglu-plot").innerHTML = `<title>Upper-bounded SiLU gate; current raw gate ${gate.toFixed(1)}</title>
+      <rect x="${x(10)}" y="36" width="120" height="172" fill="var(--gold-soft)"/>
+      ${[0, 10, 20]
+        .map(
+          (tick) =>
+            `<line x1="44" y1="${y(tick)}" x2="524" y2="${y(tick)}" stroke="var(--line)"/><text x="35" y="${
+              y(tick) + 4
+            }" text-anchor="end">${tick}</text>`
+        )
+        .join("")}
+      ${[-20, -10, 0, 10, 20].map((tick) => `<text x="${x(tick)}" y="229" text-anchor="middle">${tick}</text>`).join("")}
+      <path d="${curve(false)}" fill="none" stroke="var(--muted)" stroke-width="2" stroke-dasharray="5 4"/>
+      <path d="${curve(true)}" fill="none" stroke="var(--moe)" stroke-width="3"/>
+      <line x1="${x(gate)}" y1="36" x2="${x(gate)}" y2="208" stroke="var(--residual)" stroke-dasharray="3 4"/>
+      <circle cx="${x(gate)}" cy="${y(value.siluGate)}" r="5" fill="var(--residual)"/>
+      <text x="44" y="20" fill="var(--muted)">Dashed: ordinary SiLU</text><text x="260" y="20" fill="var(--moe)">Solid: gate capped at 10</text>
+      <text x="284" y="249" text-anchor="middle">Raw gate g</text>`;
+  }
+
+  function renderOwnership() {
+    const backward = ownershipView === "backward";
+    byId("backward").classList.toggle("backward", backward);
+    for (const button of document.querySelectorAll("[data-ownership-view]"))
+      button.setAttribute("aria-pressed", String(button.dataset.ownershipView === ownershipView));
+    const box = (
+      x,
+      y,
+      width,
+      title,
+      lines,
+      color
+    ) => `<g class="ownership-node"><rect x="${x}" y="${y}" width="${width}" height="72" rx="10" fill="var(--${color}-soft)" stroke="var(--${color})"/>
+      <text x="${x + width / 2}" y="${y + 25}" text-anchor="middle" class="ownership-title">${title}</text>${lines
+        .map((line, index) => `<text x="${x + width / 2}" y="${y + 44 + index * 15}" text-anchor="middle">${line}</text>`)
+        .join("")}</g>`;
+    const color = backward ? "residual" : "decoder";
+    const path = (fromX, fromY, toX, toY) =>
+      `<path d="M${fromX},${fromY} H${
+        (fromX + toX) / 2
+      } V${toY} H${toX}" fill="none" stroke="var(--${color})" stroke-width="2" marker-end="url(#ownership-arrow)"/>`;
+    const consumers = [
+      ["L21 / Full", 4],
+      ["L29 / Reindex", 84],
+      ["L30 / Reuse", 164],
+      ["L40 / Reuse", 244],
+    ];
+    const arrows = backward
+      ? path(430, 166, 369, 166) + path(220, 166, 169, 166) + consumers.map(([, y]) => path(742, y + 36, 626, 166)).join("")
+      : path(169, 166, 220, 166) + path(369, 166, 430, 166) + consumers.map(([, y]) => path(626, 166, 742, y + 36)).join("");
+    const svg = byId("ownership-diagram");
+    svg.setAttribute(
+      "aria-label",
+      backward
+        ? "Decoder attention gradients sum at shared KV21, then return to projection W21 and encoder output H20."
+        : "Encoder output H20 supplies projection W21, which produces global KV21 read by all 20 decoder layers."
+    );
+    svg.innerHTML = `<defs><marker id="ownership-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto"><path d="M0,0 L10,5 L0,10 Z" fill="var(--${color})"/></marker></defs>
+      ${arrows}${box(20, 130, 145, "Encoder H20", [backward ? "dH20 -> encoder" : "Causal hidden states", "Sequential path also lives"], "encoder")}
+      ${box(220, 130, 145, "L21 projection", [backward ? "dW21 + dH20" : "W21 x H20", "Own learned weights"], "decoder")}
+      ${box(
+        430,
+        130,
+        192,
+        "Shared global KV21",
+        [backward ? "Sum dKV from all consumers" : "One store, many readers", "All 20 decoder layers"],
+        color
+      )}
+      ${consumers
+        .map(([title, y]) => box(746, y, 174, title, [backward ? "dKV from attention" : "Own Q + local KV", "Representative consumer"], "decoder"))
+        .join("")}`;
+    byId("ownership-formula").textContent = backward
+      ? "dKV21 = sum of contributions from decoder attention at L21 through L40"
+      : "H20 -> W21 projection -> shared KV21 -> decoder attention at L21 through L40";
+    byId("row-gradient-arrow").textContent = backward ? "→" : "←";
+    for (const label of document.querySelectorAll(".row-gradient-label")) label.textContent = backward ? "dRow" : "Value";
+  }
+
   function initTheme() {
     let saved;
     try {
@@ -706,10 +1096,34 @@
 
   initTheme();
   renderLayers();
+  for (const button of document.querySelectorAll("[data-flow-view]")) button.addEventListener("click", () => setFlowView(button.dataset.flowView));
+  new ResizeObserver(drawBlockConnectors).observe(byId("flow-overview"));
+  window.addEventListener("beforeprint", drawBlockConnectors);
+  window.addEventListener("afterprint", () => requestAnimationFrame(drawBlockConnectors));
+  byId("inspect-expert").addEventListener("click", () => {
+    setFlowView("details");
+    selectOperation("expert_act", false);
+    byId(window.matchMedia("(max-width: 760px)").matches ? "flow-inspector" : "operation-expert_act").scrollIntoView({ block: "start" });
+  });
+  for (const card of document.querySelectorAll("[data-execution]"))
+    card.addEventListener("click", () => {
+      byId("ced-phase").value = card.dataset.execution;
+      renderCed();
+    });
+  byId("selection-mode").addEventListener("change", renderSelection);
+  for (const id of ["swiglu-gate", "swiglu-up"]) byId(id).addEventListener("input", renderSwiGLU);
+  for (const button of document.querySelectorAll("[data-ownership-view]"))
+    button.addEventListener("click", () => {
+      ownershipView = button.dataset.ownershipView;
+      renderOwnership();
+    });
   for (const id of ["ced-context", "ced-phase"]) byId(id).addEventListener("input", renderCed);
   for (const id of ["cache-context", "cache-bits"]) byId(id).addEventListener("input", renderCache);
   for (const id of ["engram-text", "engram-gate"]) byId(id).addEventListener("input", renderEngram);
   renderCed();
   renderCache();
   renderEngram();
+  renderSelection();
+  renderSwiGLU();
+  renderOwnership();
 })();

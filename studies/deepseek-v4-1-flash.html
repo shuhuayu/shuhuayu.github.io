@@ -8,12 +8,12 @@
       content="An interactive architecture study of DeepSeek V4.1 Flash: causal encoder-decoder, CSA2, shared KV, Engram, Single-Pass mHC, FP4 cache, native vision, and DSpark."
     />
     <meta name="robots" content="noindex, follow" />
-    <title>An infra-oriented diagram of DeepSeek V4.1 Flash</title>
+    <title>DeepSeek V4.1 Flash, one token at a time</title>
     <link rel="canonical" href="https://shuhuayu.github.io/studies/deepseek-v4-1-flash.html" />
-    <link rel="stylesheet" href="./deepseek-v4-1-flash.css" />
+    <link rel="stylesheet" href="./deepseek-v4-1-flash.css?v=20261102" />
     <link rel="stylesheet" href="./kimi-k3-series.css" />
-    <script src="./deepseek-v4-1-flash-model.js" defer></script>
-    <script src="./deepseek-v4-1-flash.js" defer></script>
+    <script src="./deepseek-v4-1-flash-model.js?v=20261102" defer></script>
+    <script src="./deepseek-v4-1-flash.js?v=20261102" defer></script>
   </head>
   <body>
     <a class="skip-link" href="#main">Skip to the study</a>
@@ -32,10 +32,10 @@
 
       <header class="hero">
         <div class="eyebrow">Compute &middot; memory &middot; reuse</div>
-        <h1>An infra-oriented diagram of DeepSeek V4.1 Flash</h1>
+        <h1>DeepSeek V4.1 Flash, one token at a time</h1>
         <p class="dek">
-          A 40-layer model that separates the work of building memory from the work of reading it. Four global KV stores serve the whole backbone,
-          while a huge phrase memory adds capacity through sparse lookups.
+          Follow the hidden state through a sequential transformer, then follow the memory it reads. Layer-local KV, shared global KV, and learned
+          phrase memory each have a different owner, lifetime, and cost.
         </p>
         <p class="disclosure">
           Based on the <a href="https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash/blob/main/DeepSeek_V41_Tech_Report.pdf">technical report</a>,
@@ -43,13 +43,17 @@
           logical, before parallelism. This page numbers layers 1&ndash;40; the release uses indices 0&ndash;39.
         </p>
         <nav class="study-links" aria-label="Jump to a section">
+          <a href="#motivation">Start here</a>
           <a href="#anatomy">Layer map</a>
-          <a href="#computation">Computation diagram</a>
-          <a href="#ced">Causal encoder-decoder</a>
+          <a href="#computation">One block</a>
           <a href="#csa2">CSA2</a>
+          <a href="#ced">Causal encoder-decoder</a>
           <a href="#engram">Engram</a>
-          <a href="#cache">Cache accounting</a>
+          <a href="#expert">SwiGLU expert</a>
           <a href="#extensions">Other innovations</a>
+          <a href="#training">Systems &amp; gradients</a>
+          <a href="#parameters">Parameters</a>
+          <a href="#cache">Cache accounting</a>
           <a href="#sources">Sources</a>
         </nav>
         <div class="stats" role="group" aria-label="DeepSeek V4.1 Flash headline specifications">
@@ -63,7 +67,74 @@
       </header>
 
       <main id="main" tabindex="-1">
+        <section id="motivation">
+          <div class="eyebrow">01 / The problem</div>
+          <h2>Start with three long-prompt costs</h2>
+          <p class="section-lede">
+            A conventional causal transformer processes every prompt position through every layer, stores each layer's KV, and reads the visible
+            prefix during attention. V4.1 changes these costs through separate mechanisms. Tracking them separately makes the architecture easier to
+            explain.
+          </p>
+          <div class="baseline card">
+            <span class="label">Reference: a conventional 40-layer transformer with dense causal attention</span>
+            <div class="concept-chain baseline-chain" aria-label="All prompt tokens pass sequentially through all layers">
+              <div><strong>N prompt positions</strong><small>Token embeddings</small></div>
+              <span aria-hidden="true">&rarr;</span>
+              <div><strong>Layer 1</strong><small>Attention + FFN &middot; own KV</small></div>
+              <span aria-hidden="true">&rarr;</span>
+              <div><strong>&hellip; Layer 40</strong><small>Attention + FFN &middot; own KV</small></div>
+              <span aria-hidden="true">&rarr;</span>
+              <div><strong>Next-token head</strong><small>Final hidden state</small></div>
+            </div>
+            <div class="cost-grid">
+              <article>
+                <span class="cost-number">1</span>
+                <h3>Process the prompt</h3>
+                <div class="cost-symbol">40 &times; N</div>
+                <p>Token-layer executions for the prompt. CED makes most old decoder positions unnecessary during optimized prefill.</p>
+                <a href="#ced">Follow the execution modes &rarr;</a>
+              </article>
+              <article>
+                <span class="cost-number">2</span>
+                <h3>Store the history</h3>
+                <div class="cache-stripes" aria-label="Separate growing caches at layers 1, 2, and 40">
+                  <span>L1 <i></i></span><span>L2 <i></i></span><span>&hellip;</span><span>L40 <i></i></span>
+                </div>
+                <p>Each layer owns history. CSA2 shares global stores; FP4 reduces bytes per entry. Local windows remain layer-specific.</p>
+                <a href="#cache">Count the stored bytes &rarr;</a>
+              </article>
+              <article>
+                <span class="cost-number">3</span>
+                <h3>Choose what to read</h3>
+                <div class="position-strip" aria-label="Attention reads a causally visible prefix">
+                  <i></i><i></i><i></i><i></i><i></i><i></i><i></i><i class="future"></i><i class="future"></i>
+                </div>
+                <p>Dense attention reads the visible prefix. CSA2 selects a small global subset and shares some of the selection work.</p>
+                <a href="#csa2">Follow the sparse search &rarr;</a>
+              </article>
+            </div>
+            <p class="note">40N is a count of token-layer executions. KV width and attention layout depend on the reference model.</p>
+          </div>
+          <div class="walkthrough card">
+            <div>
+              <span class="label">Suggested team walkthrough / about 35 minutes</span>
+              <h3>Follow one token, then account for its memory</h3>
+            </div>
+            <ol class="walkthrough-list">
+              <li><a href="#motivation">Long-prompt costs</a><span>3 min</span></li>
+              <li><a href="#anatomy">The 40-layer map</a><span>3 min</span></li>
+              <li><a href="#computation">One block and four streams</a><span>5 min</span></li>
+              <li><a href="#csa2">Produce, select, read</a><span>7 min</span></li>
+              <li><a href="#ced">Prefill, decode, training</a><span>5 min</span></li>
+              <li><a href="#engram">A worked phrase lookup</a><span>4 min</span></li>
+              <li><a href="#extensions">Experts and other pieces</a><span>3 min</span></li>
+              <li><a href="#training">Ownership, gradients, evidence</a><span>5 min</span></li>
+            </ol>
+          </div>
+        </section>
+
         <section id="anatomy">
+          <div class="eyebrow">02 / Model overview</div>
           <h2>The model at a glance</h2>
           <p class="section-lede">
             Both halves are causal: a token can read only its own position and earlier positions. All 40 blocks have MoE, local sliding-window
@@ -79,7 +150,7 @@
               </div>
               <div class="backbone">
                 <span class="label">Language backbone &middot; width 5120</span>
-                <strong>One sequential stack, two sources of memory</strong>
+                <strong>One sequential stack, four residual streams</strong>
                 <div class="halves">
                   <div class="half">
                     <strong>Encoder / L1&ndash;20</strong>
@@ -139,11 +210,16 @@
         </section>
 
         <section id="computation">
-          <h2>Follow one block through its tensors</h2>
+          <div class="eyebrow">03 / Follow the hidden state</div>
+          <h2>One block, with its memory sources attached</h2>
           <p class="section-lede">
-            Choose a layer, then select an operation to inspect its weights, precision, and backward dependencies. Solid heavy borders mark matrix
-            multiplies or attention; dashed boxes show shared state or communication.
+            Start with Layer 30, a decoder Reuse layer. Its incoming hidden state comes from Layer 29. Its global KV comes from Layer 21, and its
+            selected positions come from Layer 29. It computes its own main query and local KV. Select a box to inspect the operation.
           </p>
+          <div class="view-switch" role="group" aria-label="Block diagram detail">
+            <button type="button" data-flow-view="overview" aria-pressed="true">Overview</button>
+            <button type="button" data-flow-view="details" aria-pressed="false">Tensor &amp; kernel details</button>
+          </div>
           <div class="controls card">
             <label
               >Layer
@@ -161,22 +237,33 @@
               </select>
             </label>
             <label
-              >Box labels
+              >Detail box labels
               <select id="flow-lens">
                 <option value="shapes">Tensor shapes</option>
                 <option value="params">Weight parameters</option>
               </select>
             </label>
           </div>
-          <p class="note">
-            T counts current query/local positions; G counts new global source positions; S counts retained global entries. R = 6T counts routed
-            token-expert assignments. During optimized decoder prefill, the global projection can process the full encoder prompt while the
-            query/local path processes 128 replay positions. Encoder pooling emits only completed pairs, including any carried partial pair.
-            Batch/document boundaries are suppressed here; causal masks preserve them. Deployment can fuse several logical operations into one kernel.
-          </p>
-          <div class="flow-layout">
-            <div class="flow-diagram card" id="flow-diagram"></div>
-            <aside class="inspector card" id="flow-inspector" aria-live="polite">
+          <details class="shape-note">
+            <summary>Token dimensions and training conventions</summary>
+            <p class="note">
+              T counts current query/local positions; G counts new global source positions; S counts retained global entries. R = 6T counts routed
+              token-expert assignments. During optimized decoder prefill, the global projection can process the full encoder prompt while the
+              query/local path processes 128 replay positions. Encoder pooling emits only completed pairs, including any carried partial pair.
+              Batch/document boundaries are suppressed here; causal masks preserve them. Deployment can fuse several logical operations into one
+              kernel.
+            </p>
+          </details>
+          <div class="flow-layout overview" id="flow-layout">
+            <div class="block-overview card" id="flow-overview">
+              <h3>Layer 29 output &rarr; Layer 30 attention &rarr; MoE &rarr; Layer 30 output</h3>
+              <p>
+                Four residual streams bypass each dense sublayer and are mixed back at its mHC merge. Layer 30 reads its own local KV, L21 global KV,
+                and L29 position indices.
+              </p>
+            </div>
+            <div class="flow-diagram card" id="flow-diagram" hidden></div>
+            <aside class="inspector card" id="flow-inspector" aria-live="polite" tabindex="-1">
               <div class="eyebrow">Operation inspector</div>
               <h3>Select an operation</h3>
               <p>Inspect how current-layer computation connects to shared memory.</p>
@@ -193,11 +280,174 @@
           </p>
         </section>
 
+        <section id="csa2">
+          <div class="eyebrow">04 / Memory ownership and sparse reading</div>
+          <h2>CSA2: separate producing, selecting, and reading</h2>
+          <p class="section-lede">
+            Each attention layer reads its local window plus at most 512 selected global entries. Main queries are always layer-specific. The three
+            modes decide who makes the global memory and who chooses its positions.
+          </p>
+          <div class="table-wrap">
+            <table>
+              <caption class="sr-only">
+                CSA2 computation responsibilities
+              </caption>
+              <thead>
+                <tr>
+                  <th scope="col">Mode</th>
+                  <th scope="col">Examples</th>
+                  <th scope="col">Global KV + indexer K</th>
+                  <th scope="col">Indexer query + Top-K</th>
+                  <th scope="col">Main query + local KV</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><span class="mode-pill full">Full</span></td>
+                  <td>L3, L9, L15, L21</td>
+                  <td>Generate new memory</td>
+                  <td>Compute fresh selection</td>
+                  <td>Compute independently</td>
+                </tr>
+                <tr>
+                  <td><span class="mode-pill reindex">Reindex</span></td>
+                  <td>L25, L29, L33, L37</td>
+                  <td>Reuse L21 memory</td>
+                  <td>Own query; fresh selection</td>
+                  <td>Compute independently</td>
+                </tr>
+                <tr>
+                  <td><span class="mode-pill">Reuse</span></td>
+                  <td>30 layers, including L30</td>
+                  <td>Reuse the group's memory</td>
+                  <td>Reuse latest Top-K; no indexer query</td>
+                  <td>Compute independently</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="reading-notes">
+            <article class="reading-note" style="--accent: var(--encoder)">
+              <h3>Encoder groups compress pairs</h3>
+              <p>
+                L3&ndash;8, L9&ndash;14, and L15&ndash;20 each have a separate global store at ratio 2:1. A learned channel-wise softmax pools each
+                pair; groups do not overlap.
+              </p>
+            </article>
+            <article class="reading-note" style="--accent: var(--decoder)">
+              <h3>One global store spans the decoder</h3>
+              <p>
+                L21 projects H20 at ratio 1:1. All 20 decoder layers share this store. Four deeper indexers update which entries their groups read.
+              </p>
+            </article>
+          </div>
+          <h3 style="margin-top: 32px">Hierarchical indexing bounds the deeper searches</h3>
+          <div class="search-flow">
+            <div class="search-step">
+              <span class="label">L21 / initial search</span><strong>Full visible context</strong>
+              <p>Score causally visible positions. Select Top-512 for L21 and score each 8-position block by its maximum.</p>
+            </div>
+            <div class="search-step">
+              <span class="label">Shared candidate pool</span><strong>&le;16,384</strong>
+              <p>Keep up to 2,048 blocks &times; 8 positions. The pool is larger than the final attention selection.</p>
+            </div>
+            <div class="search-step">
+              <span class="label">L25 / L29 / L33 / L37</span><strong>&le;512</strong>
+              <p>Each Reindex layer rescores only the candidate pool with its own indexer query, then selects its own Top-512.</p>
+            </div>
+          </div>
+          <p class="note">
+            The first search still grows with context length. Later decoder searches are bounded by the fixed candidate pool. Reuse layers perform no
+            search. The candidate restriction is introduced during post-training and applied during inference.
+          </p>
+          <div class="selection-example card">
+            <span class="label">Worked example / reduced sizes, invented scores</span>
+            <h3>Compression, candidates, and selected positions are different steps</h3>
+            <p class="note">
+              First, an encoder example: 12 input positions form six non-overlapping pairs. Learned channel-wise softmax weights pool each pair into
+              one global latent. These are six stored entries, before any sparse selection.
+            </p>
+            <div class="pair-pool" aria-label="Twelve encoder token positions pool into six global entries">
+              <div><span>1 &middot; 2</span><i aria-hidden="true">&darr;</i><strong>E1</strong></div>
+              <div><span>3 &middot; 4</span><i aria-hidden="true">&darr;</i><strong>E2</strong></div>
+              <div><span>5 &middot; 6</span><i aria-hidden="true">&darr;</i><strong>E3</strong></div>
+              <div><span>7 &middot; 8</span><i aria-hidden="true">&darr;</i><strong>E4</strong></div>
+              <div><span>9 &middot; 10</span><i aria-hidden="true">&darr;</i><strong>E5</strong></div>
+              <div><span>11 &middot; 12</span><i aria-hidden="true">&darr;</i><strong>E6</strong></div>
+            </div>
+            <p class="note">
+              Now switch to the decoder's separate 1:1 store. The current token is at position 25 of a 32-position sequence. We use 4-position blocks,
+              retain 3 candidate blocks, and select Top-3; the released model uses 8, 2,048, and 512 respectively.
+            </p>
+            <label class="example-control"
+              >Decoder operation
+              <select id="selection-mode">
+                <option value="Full">L21 / Full: build memory and search visible positions</option>
+                <option value="Reindex">L29 / Reindex: rescore the candidate pool</option>
+                <option value="Reuse" selected>L30 / Reuse: read L29's selection</option>
+              </select>
+            </label>
+            <div class="legend" aria-label="Worked selection legend">
+              <span><i style="--legend-color: var(--decoder)"></i> Candidate block</span>
+              <span><i style="--legend-color: var(--ink)"></i> Selected for global attention</span>
+              <span><i style="--legend-color: var(--paper-deep)"></i> Future / causally masked</span>
+              <span><i style="--legend-color: var(--encoder)"></i> Current position / 25</span>
+            </div>
+            <div class="selection-grid" id="selection-grid" aria-label="Numbered global positions and indexer scores"></div>
+            <div class="selection-readout" id="selection-readout" aria-live="polite"></div>
+            <p class="note">
+              The Full layer keeps candidate blocks 1, 5, and 6 by their maximum visible score. Reindex can choose different positions within those
+              blocks. It cannot add a position outside the candidate pool. Reuse keeps those position IDs and computes new main attention with its own
+              query, local KV, and sink. All 25 visible global entries remain stored.
+            </p>
+          </div>
+          <p class="note">
+            Relative to V4 CSA, the compressor removes overlap and learned absolute position embeddings. Indexer K is projected from the main KV
+            latent before RoPE. The core attention still gathers local and selected global latents, with a per-head attention sink.
+          </p>
+          <p class="source-note">
+            <a href="https://arxiv.org/html/2609.19969v1#S2.SS3">Report &sect;2.3</a> and the released compressor, indexer, and attention
+            implementations.
+          </p>
+        </section>
+
         <section id="ced">
+          <div class="eyebrow">05 / Execution changes with the task</div>
           <h2>Encode the prompt, then read its memory</h2>
           <p class="section-lede">
             CED changes where decoder global KV comes from. It is projected from the last encoder output H20, so the global memory of an old prompt
             position can exist without computing that position through L21&ndash;40.
+          </p>
+          <div class="execution-grid" role="group" aria-label="Compare prefill, decode, and training; select a mode">
+            <button type="button" class="execution-card selected" data-execution="prefill" aria-pressed="true">
+              <span class="label">Prompt prefill / optimized serving</span><strong>Encode all, replay a tail</strong>
+              <span class="execution-lane"
+                ><span>Encoder</span><i class="encoder-bar"></i><small id="execution-prefill-encoder">All 65,536 positions</small></span
+              >
+              <span class="execution-lane"
+                ><span>Decoder</span><i class="decoder-bar tail-bar"></i><small id="execution-prefill-decoder">Last 128 positions</small></span
+              >
+              <span class="execution-result">Full-prompt global KV + recent local caches &rarr; next-token logits</span>
+            </button>
+            <button type="button" class="execution-card" data-execution="decode" aria-pressed="false">
+              <span class="label">Decode / one generated token</span><strong>Run all 40 layers</strong>
+              <span class="execution-lane"><span>Encoder</span><i class="encoder-bar token-bar"></i><small>One new position</small></span>
+              <span class="execution-lane"><span>Decoder</span><i class="decoder-bar token-bar"></i><small>Same new position</small></span>
+              <span class="execution-result">Extend global KV at producers + local KV at every layer &rarr; logits</span>
+            </button>
+            <button type="button" class="execution-card" data-execution="training" aria-pressed="false">
+              <span class="label">Training / teacher-forced next tokens</span><strong>Run all prediction positions</strong>
+              <span class="execution-lane"
+                ><span>Encoder</span><i class="encoder-bar"></i><small id="execution-training-encoder">All 65,536 positions</small></span
+              >
+              <span class="execution-lane"
+                ><span>Decoder</span><i class="decoder-bar"></i><small id="execution-training-decoder">All 65,536 positions</small></span
+              >
+              <span class="execution-result">Causal outputs at every training position &rarr; next-token losses</span>
+            </button>
+          </div>
+          <p class="note">
+            The lanes show which positions execute; their length is schematic. Select a card to update the detailed execution and work view.
           </p>
           <div class="controls card">
             <label
@@ -278,101 +528,22 @@
           </p>
         </section>
 
-        <section id="csa2">
-          <h2>CSA2: separate producing, selecting, and reading</h2>
-          <p class="section-lede">
-            Each attention layer reads its local window plus at most 512 selected global entries. Main queries are always layer-specific. The three
-            modes decide who makes the global memory and who chooses its positions.
-          </p>
-          <div class="table-wrap">
-            <table>
-              <caption class="sr-only">
-                CSA2 computation responsibilities
-              </caption>
-              <thead>
-                <tr>
-                  <th scope="col">Mode</th>
-                  <th scope="col">Examples</th>
-                  <th scope="col">Global KV + indexer K</th>
-                  <th scope="col">Indexer query + Top-K</th>
-                  <th scope="col">Main query + local KV</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr>
-                  <td><span class="mode-pill full">Full</span></td>
-                  <td>L3, L9, L15, L21</td>
-                  <td>Generate new memory</td>
-                  <td>Compute fresh selection</td>
-                  <td>Compute independently</td>
-                </tr>
-                <tr>
-                  <td><span class="mode-pill reindex">Reindex</span></td>
-                  <td>L25, L29, L33, L37</td>
-                  <td>Reuse L21 memory</td>
-                  <td>Own query; fresh selection</td>
-                  <td>Compute independently</td>
-                </tr>
-                <tr>
-                  <td><span class="mode-pill">Reuse</span></td>
-                  <td>30 layers, including L30</td>
-                  <td>Reuse the group's memory</td>
-                  <td>Reuse latest Top-K; no indexer query</td>
-                  <td>Compute independently</td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-          <div class="reading-notes">
-            <article class="reading-note" style="--accent: var(--encoder)">
-              <h3>Encoder groups compress pairs</h3>
-              <p>
-                L3&ndash;8, L9&ndash;14, and L15&ndash;20 each have a separate global store at ratio 2:1. A learned channel-wise softmax pools each
-                pair; groups do not overlap.
-              </p>
-            </article>
-            <article class="reading-note" style="--accent: var(--decoder)">
-              <h3>One global store spans the decoder</h3>
-              <p>
-                L21 projects H20 at ratio 1:1. All 20 decoder layers share this store. Four deeper indexers update which entries their groups read.
-              </p>
-            </article>
-          </div>
-          <h3 style="margin-top: 32px">Hierarchical indexing bounds the deeper searches</h3>
-          <div class="search-flow">
-            <div class="search-step">
-              <span class="label">L21 / initial search</span><strong>Full visible context</strong>
-              <p>Score causally visible positions. Select Top-512 for L21 and score each 8-position block by its maximum.</p>
-            </div>
-            <div class="search-step">
-              <span class="label">Shared candidate pool</span><strong>&le;16,384</strong>
-              <p>Keep up to 2,048 blocks &times; 8 positions. The pool is larger than the final attention selection.</p>
-            </div>
-            <div class="search-step">
-              <span class="label">L25 / L29 / L33 / L37</span><strong>&le;512</strong>
-              <p>Each Reindex layer rescores only the candidate pool with its own indexer query, then selects its own Top-512.</p>
-            </div>
-          </div>
-          <p class="note">
-            The first search still grows with context length. Later decoder searches are bounded by the fixed candidate pool. Reuse layers perform no
-            search. The candidate restriction is introduced during post-training and applied during inference.
-          </p>
-          <p class="note">
-            Relative to V4 CSA, the compressor removes overlap and learned absolute position embeddings. Indexer K is projected from the main KV
-            latent before RoPE. The core attention still gathers local and selected global latents, with a per-head attention sink.
-          </p>
-          <p class="source-note">
-            <a href="https://arxiv.org/html/2609.19969v1#S2.SS3">Report &sect;2.3</a> and the released compressor, indexer, and attention
-            implementations.
-          </p>
-        </section>
-
         <section id="engram">
+          <div class="eyebrow">06 / Learned phrase memory</div>
           <h2>Engram: a huge phrase embedding with a gate</h2>
           <p class="section-lede">
             An ordinary embedding maps a token ID to a learned vector. Engram maps recent 2-, 3-, and 4-token groups to learned vectors. The current
             hidden state decides how much of that memory to add to each residual stream.
           </p>
+          <div class="concept-chain engram-chain" aria-label="Engram addressing and contextual injection">
+            <div><strong>Recent token IDs</strong><small>2-, 3-, and 4-grams</small></div>
+            <span aria-hidden="true">&rarr;</span>
+            <div><strong>Hash addresses</strong><small>8 heads per order</small></div>
+            <span aria-hidden="true">&rarr;</span>
+            <div><strong>Learned table rows</strong><small>24 &times; 256 channels</small></div>
+            <span aria-hidden="true">&rarr;</span>
+            <div><strong>Projection + gate</strong><small>Current hidden state controls injection</small></div>
+          </div>
           <div class="lookup-card card">
             <span class="label">One Engram module / addressing demonstration</span>
             <div class="lookup-input">
@@ -390,6 +561,10 @@
               <strong>24 fetched vectors &times; 256 channels = 6,144 channels</strong>
               <p class="note">Concatenate 8 hash-head vectors for each of 3 orders. A learned projection produces four keys and one shared value.</p>
               <div class="formula">[T, 6144] &rarr; Wkv &rarr; keys [T, 4, 5120] + value [T, 5120]</div>
+              <div class="engram-streams" aria-label="The shared value enters four residual streams with separate contextual gates">
+                <span>H1 + &beta;1 &middot; V</span><span>H2 + &beta;2 &middot; V</span> <span>H3 + &beta;3 &middot; V</span
+                ><span>H4 + &beta;4 &middot; V</span>
+              </div>
               <p class="formula" id="engram-gate-result" aria-live="polite">Updated stream = H + 0.60 &times; V</p>
               <p class="note">
                 The actual model computes a gate separately for each stream from normalized hidden/key compatibility. Words here are illustrative
@@ -445,7 +620,435 @@
           </p>
         </section>
 
+        <section id="extensions">
+          <div class="eyebrow">07 / Open the components</div>
+          <h2>The other pieces of the design</h2>
+          <p class="section-lede">
+            CED and CSA2 target long-context compute and cache storage. These additions address residual traffic, numerical formats, vision, and
+            generation throughput.
+          </p>
+          <article class="expert-inset card" id="expert">
+            <span class="label">Inside the MoE / six routed experts + one shared expert per token</span>
+            <h3>Each text expert uses bounded SwiGLU</h3>
+            <p>
+              Gate and up projections each produce 2,304 channels. The gate has an upper bound of 10; the up branch is bounded at both &minus;10 and
+              +10. Ordinary SiLU transforms the gate, then multiplies it by the up branch before the down projection.
+            </p>
+            <div class="expert-paths" aria-label="The two expert branches join by multiplication">
+              <div>
+                <span class="label">Gate branch / W1</span><strong>g &rarr; min(g, 10) &rarr; SiLU</strong
+                ><small>SiLU(g) = g &times; sigmoid(g)</small>
+              </div>
+              <div>
+                <span class="label">Up branch / W3</span><strong>u &rarr; clamp(u, &minus;10, 10)</strong
+                ><small>Multiply with the transformed gate</small>
+              </div>
+              <div class="expert-join">
+                <strong>SiLU(bounded g) &times; bounded u</strong
+                ><small>FP32 product &rarr; routed weight if present &rarr; input dtype &rarr; W2 down projection to 5,120 channels</small>
+              </div>
+            </div>
+            <div class="expert-interactive">
+              <div>
+                <label class="example-control">
+                  <span>Raw gate g: <output id="swiglu-gate-label">12.0</output></span>
+                  <input id="swiglu-gate" type="range" min="-20" max="20" step="0.1" value="12" />
+                </label>
+                <label class="example-control">
+                  <span>Raw up u: <output id="swiglu-up-label">&minus;14.0</output></span>
+                  <input id="swiglu-up" type="range" min="-20" max="20" step="0.1" value="-14" />
+                </label>
+                <div class="formula" id="swiglu-result" aria-live="polite"></div>
+                <p class="note">Try a negative gate below &minus;10: it stays below &minus;10. Only the gate's upper end is clamped.</p>
+              </div>
+              <div>
+                <svg id="swiglu-plot" viewBox="0 0 560 250" role="img" aria-label="Ordinary SiLU and upper-bounded SiLU as the gate varies"></svg>
+                <p class="note">Scalar browser math illustrates the function; it does not emulate BF16 rounding or a GPU kernel.</p>
+              </div>
+            </div>
+            <pre class="expert-code"><code>gate = gate.float().clamp(max=10)
+up = up.float().clamp(min=-10, max=10)
+hidden = F.silu(gate) * up
+if route_weight is not None:
+    hidden = route_weight * hidden
+output = w2(hidden.to(input_dtype))</code></pre>
+            <p class="note">
+              The reference evaluates the activation in FP32. Routed experts apply their selected routing weight before the cast and W2; the shared
+              expert has no routing weight. The vision encoder uses ordinary SwiGLU; its language-width projector uses GELU.
+            </p>
+            <button class="small-button" id="inspect-expert" type="button">Inspect routed expert tensors &rarr;</button>
+            <p class="source-note">
+              <a href="https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash/blob/main/inference/model.py">Reference Expert.forward</a> and
+              <a href="https://arxiv.org/html/2609.19969v1#S3.SS1.SSS1">Report &sect;3.1.1</a> specify the activation and limit.
+            </p>
+          </article>
+          <div class="extension-grid">
+            <article class="extension card" id="mhc" style="--accent: var(--residual)">
+              <span class="label">Depth / residual mixing</span>
+              <h3>Single-Pass mHC</h3>
+              <p>
+                Each sublayer predicts input, output, and residual mixing coefficients. The input mix used now comes from the previous sublayer,
+                removing a reduction dependency from the critical path.
+              </p>
+              <div class="formula">X[l+1] = B[l] X[l] + C[l] F(A[l-1] X[l])</div>
+              <p>
+                Mega-mHC fuses residual update, input mixing, coefficient prediction, pre-norm, and FP8 conversion. The report halves mHC activation
+                traffic relative to its original implementation; this is a residual-module saving.
+              </p>
+              <p>The final stream merge consumes the carried mixing coefficients too.</p>
+            </article>
+            <article class="extension card" id="fp4" style="--accent: var(--decoder)">
+              <span class="label">Precision / cache layout</span>
+              <h3>FP4 main KV</h3>
+              <p>Quantize the full 512-channel latent after RoPE into E2M1, with one E4M3 scale per 16 channels and no second-level global scale.</p>
+              <div class="formula">512 &times; 4 bits + 32 &times; 8-bit scales<br />= 288 bytes per main KV entry</div>
+              <p>
+                Attention dequantizes cached values before using them. Main KV QAT is introduced during post-training. Local SWA KV stays FP8 because
+                it is more sensitive to quantization.
+              </p>
+            </article>
+            <article class="extension card" id="vision" style="--accent: var(--vision)">
+              <span class="label">Native multimodal input</span>
+              <h3>DeepSeek-ViT</h3>
+              <p>
+                A 32-layer, width-1024 ViT uses 16 heads, 2D RoPE, RMSNorm, and SwiGLU. Linear patch embedding keeps the projection compatible with
+                Muon.
+              </p>
+              <div class="formula">
+                1344&times;1344 image &rarr; 96&times;96 patches<br />3&times;3 unshuffle &rarr; 32&times;32 visual tokens<br />MLP projector &rarr;
+                5120 channels
+              </div>
+              <p>
+                At that resolution, 9,216 patch tokens become 1,024 language-model visual tokens. Image and text expert routing have separate
+                load-balancing correction biases.
+              </p>
+            </article>
+            <article class="extension card" id="dspark" style="--accent: var(--moe)">
+              <span class="label">Generation / speculation</span>
+              <h3>DSpark</h3>
+              <p>
+                Three drafter blocks produce base logits for five draft positions in parallel. A lightweight Markov head models token dependencies; a
+                confidence head estimates acceptance probabilities.
+              </p>
+              <div class="formula">3 draft blocks &rarr; 5 positions<br />Confidence + engine load &rarr; verification length</div>
+              <p>
+                The scheduler adapts verification length to expected system throughput. DSpark is trained after backbone pre-training, then kept
+                aligned during post-training without sending its objective's gradients into the backbone.
+              </p>
+            </article>
+          </div>
+          <p class="source-note">
+            <a href="https://arxiv.org/html/2609.19969v1#S2.SS4">Report &sect;2.4</a> and
+            <a href="https://arxiv.org/html/2609.19969v1#S2.SS1.SSS1">&sect;2.1.1</a>.
+          </p>
+        </section>
+
+        <section id="training">
+          <div class="eyebrow">08 / Systems and evidence</div>
+          <h2>Training needs explicit ownership and lifetimes</h2>
+          <p class="section-lede">
+            The report pre-trains on 45T multimodal tokens, using sparse attention from the start at 64K context. Context expands to 1M at 34T tokens.
+            Teacher-forced execution keeps the full 40-layer graph; shared activations introduce distributed responsibilities.
+          </p>
+          <h3 id="v4-comparison" class="subsection-title">What changes from DeepSeek V4 Flash?</h3>
+          <div class="table-wrap">
+            <table>
+              <caption class="sr-only">
+                V4 Flash and V4.1 Flash architecture and systems consequences
+              </caption>
+              <thead>
+                <tr>
+                  <th scope="col">Mechanism</th>
+                  <th scope="col">V4 Flash</th>
+                  <th scope="col">V4.1 Flash</th>
+                  <th scope="col">Effect on the system</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>Backbone</td>
+                  <td>43 layers; width 4096; 284B reported parameters</td>
+                  <td>40 layers; width 5120; 552B backbone + 196B Engram</td>
+                  <td>Fewer cache producers coexist with larger stored model capacity.</td>
+                </tr>
+                <tr>
+                  <td>Global memory</td>
+                  <td>21 CSA + 20 HCA layers each produce their own compressed memory</td>
+                  <td>Four Full layers produce all global KV and indexer K</td>
+                  <td>Less repeated projection and storage; shared values and gradients must cross consumer boundaries.</td>
+                </tr>
+                <tr>
+                  <td>Global attention</td>
+                  <td>CSA: 4:1 compression + Top-512; HCA: 128:1 compression + dense reading</td>
+                  <td>CSA2 throughout: 2:1 encoder / 1:1 decoder, each with sparse global reading</td>
+                  <td>Gathered-attention math remains useful; compressor ratios, memory sources, and control flow change.</td>
+                </tr>
+                <tr>
+                  <td>Position selection</td>
+                  <td>Each CSA layer has its own indexer</td>
+                  <td>Eight selection producers; four deeper decoder indexers rescore a shared candidate pool</td>
+                  <td>Most layers skip indexing. The initial decoder search grows with context; later searches use bounded candidates.</td>
+                </tr>
+                <tr>
+                  <td>Prompt prefill</td>
+                  <td>Full sequential stack over prompt positions</td>
+                  <td>Encoder over all positions; bounded decoder replay over the tail</td>
+                  <td>About half the token-layer work for long fresh prompts under optimized serving. Training still runs all positions.</td>
+                </tr>
+                <tr>
+                  <td>Residual mixing</td>
+                  <td>mHC input mix depends on current-sublayer coefficients</td>
+                  <td>Single-Pass mHC consumes coefficients carried from the previous sublayer</td>
+                  <td>Shorter reduction dependency; Mega-mHC can fuse the residual operations.</td>
+                </tr>
+                <tr>
+                  <td>Global cache format</td>
+                  <td>FP8 CSA cache; BF16 HCA main cache</td>
+                  <td>FP4 global main KV + FP4 indexer K; FP8 local windows</td>
+                  <td>Packed storage and reads need the right kernel layout. Logical reuse alone does not implement FP4 packing.</td>
+                </tr>
+                <tr>
+                  <td>Persistent prefix cache</td>
+                  <td>Retains global KV and some SWA KV for reuse</td>
+                  <td>Persists global KV; SWA uses a separate cache and bounded replay on misses</td>
+                  <td>Reduces host / SSD storage and cache-transfer volume, with approximate reconstruction at a replay boundary.</td>
+                </tr>
+                <tr>
+                  <td>Phrase memory</td>
+                  <td>No Engram module</td>
+                  <td>Learned token-addressed tables at L2 and L15</td>
+                  <td>Adds sparse lookup capacity, row sharding, prefetch, and gradient-return traffic.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <p class="source-note">
+            Flash-to-Flash comparison from the <a href="./deepseek-v4.html">V4 study and release configuration</a> and the
+            <a href="https://arxiv.org/html/2609.19969v1#S2">V4.1 report</a>. The last column explains architectural consequences; it is not a
+            hardware benchmark.
+          </p>
+          <div class="ownership-card card" id="backward">
+            <span class="label">The same shared value has several differentiable consumers</span>
+            <h3>Reuse shares an activation; gradients return to its producer</h3>
+            <div class="view-switch" role="group" aria-label="Shared memory forward or backward view">
+              <button type="button" data-ownership-view="forward" aria-pressed="false">Forward reads</button>
+              <button type="button" data-ownership-view="backward" aria-pressed="true">Backward gradients</button>
+            </div>
+            <div class="diagram-scroll">
+              <svg
+                id="ownership-diagram"
+                viewBox="0 0 940 320"
+                role="img"
+                aria-label="Decoder attention gradients accumulate at shared KV and return through the layer 21 projection to H20"
+              ></svg>
+            </div>
+            <p class="formula" id="ownership-formula" aria-live="polite">dKV21 = sum of contributions from decoder attention at L21 through L40</p>
+            <p class="note">
+              The drawing shows four representative consumers; all 20 decoder layers contribute. Gradients to selected global values sum at the L21
+              producer, then flow into its projection weights and H20. The sequential hidden-state path also backpropagates normally. Integer position
+              IDs are discrete; indexer training uses a separate objective and gradient policy.
+            </p>
+            <h3 class="subsection-title">Engram returns gradients to selected table rows</h3>
+            <div class="row-gradient-flow">
+              <div class="row-gradient-caption">
+                <strong>Token-addressed lookup</strong><small>Three example addresses from one module's 24 fetched rows</small>
+              </div>
+              <span class="row-gradient-arrow" id="row-gradient-arrow" aria-hidden="true">&rarr;</span>
+              <div class="table-row-demo" aria-label="Example table rows; 17, 203, and 901 receive gradients from this lookup">
+                <span><small>Row 16</small><strong>&mdash;</strong></span>
+                <span class="accessed"><small>Row 17</small><strong class="row-gradient-label">dRow</strong></span>
+                <span><small>&hellip;</small><strong>&mdash;</strong></span>
+                <span class="accessed"><small>Row 203</small><strong class="row-gradient-label">dRow</strong></span>
+                <span><small>&hellip;</small><strong>&mdash;</strong></span>
+                <span class="accessed"><small>Row 901</small><strong class="row-gradient-label">dRow</strong></span>
+              </div>
+            </div>
+            <p class="note">
+              Unselected rows receive no gradient from this lookup. Repeated accesses to a row accumulate. Token-to-address hashes carry no gradient;
+              the fetched vectors, projection, and context gate are learned. Row numbers here are illustrative.
+            </p>
+          </div>
+          <div class="training-grid">
+            <article class="card">
+              <span class="label">Shared attention state</span>
+              <h3>Carry values and their gradients</h3>
+              <p>
+                Shared KV, indexer keys, and selections can cross pipeline stages. Per-microbatch state tracks their consumers through forward,
+                recomputation, and backward, retaining them until the last consumer finishes.
+              </p>
+            </article>
+            <article class="card">
+              <span class="label">Engram parallelism</span>
+              <h3>Shard rows, prefetch lookups</h3>
+              <p>
+                Dedicated process groups own table row partitions. Prefetch begins before stage microbatches. Lookup gradients are buffered and
+                returned to their owning ranks after backbone backward; optimizer states are further sharded.
+              </p>
+            </article>
+            <article class="card">
+              <span class="label">Optimizer allocation</span>
+              <h3>Match updates to the matrices</h3>
+              <p>
+                Backbone linear matrices use Muon, with head-wise treatment for Q/K. Engram tables, token embeddings, and prediction heads use
+                momentum plus Sinkhorn balancing. RMSNorm and other non-matrix parameters use AdamW.
+              </p>
+            </article>
+          </div>
+          <h3 class="subsection-title">Who owns each kind of memory, and how long does it live?</h3>
+          <div class="table-wrap">
+            <table>
+              <caption class="sr-only">
+                Attention and Engram state owners and lifetimes
+              </caption>
+              <thead>
+                <tr>
+                  <th scope="col">State</th>
+                  <th scope="col">Owner</th>
+                  <th scope="col">Serving lifetime</th>
+                  <th scope="col">Training responsibility</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>Local KV</td>
+                  <td>Each of 40 layers</td>
+                  <td>Recent 128 positions per active sequence</td>
+                  <td>Retain or recompute layer-local activations for attention backward.</td>
+                </tr>
+                <tr>
+                  <td>Global KV + indexer K</td>
+                  <td>L3, L9, L15, L21</td>
+                  <td>Grows with the prefix; global KV can be persisted for reuse</td>
+                  <td>Track all consumers per microbatch; return and sum gradients under the relevant objective.</td>
+                </tr>
+                <tr>
+                  <td>Top-K / candidate IDs</td>
+                  <td>Full and Reindex producers</td>
+                  <td>Selection for query positions, shared with later consumers</td>
+                  <td>Keep IDs for gather/scatter backward, or recompute them. IDs themselves are not differentiable.</td>
+                </tr>
+                <tr>
+                  <td>Engram parameters</td>
+                  <td>Table-row shards</td>
+                  <td>Model weights persist across requests; fetched row buffers are transient</td>
+                  <td>Prefetch row values; return selected-row gradients to the owning ranks.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <h3 style="margin-top: 32px">What this means for existing V4 code</h3>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">Piece</th>
+                  <th scope="col">Reusable foundation</th>
+                  <th scope="col">V4.1 integration work</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>Attention kernel</td>
+                  <td>Gather local + selected global latents and normalize with the sink</td>
+                  <td>Support packed FP4 reads and the chosen layout; expose shared KV and supplied selections</td>
+                </tr>
+                <tr>
+                  <td>Compressor / indexer</td>
+                  <td>Projection, normalization, pooling, and Top-K primitives</td>
+                  <td>Ratio 2 encoder / ratio 1 global decoder; new indexer K source, three modes, hierarchical candidates</td>
+                </tr>
+                <tr>
+                  <td>MoE / residuals</td>
+                  <td>Routed and shared experts; Sinkhorn and residual combination math</td>
+                  <td>Modality-specific routing biases; carried Single-Pass mHC input coefficients</td>
+                </tr>
+                <tr>
+                  <td>Model / distributed runtime</td>
+                  <td>Common decoder, linear, normalization, and sharding infrastructure</td>
+                  <td>CED source relationships, shared-state ownership and gradients, new checkpoint mappings</td>
+                </tr>
+                <tr>
+                  <td>Engram / vision / drafter</td>
+                  <td>Embedding, ViT, and transformer building blocks</td>
+                  <td>New table lookup integration, DeepSeek vision configuration, and DSpark algorithm</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <p class="note">
+            The existing TorchTitan V4 attention wrapper selects CSA for ratio 4, HCA for other compressed ratios, and local-only attention for ratio
+            1. V4.1 requires indexed global attention at both ratios 2 and 1, so the model needs new control flow and configuration wiring.
+          </p>
+          <h3 class="subsection-title" id="evidence">Read the savings with their scope attached</h3>
+          <div class="table-wrap">
+            <table>
+              <caption class="sr-only">
+                Architectural calculations versus reported deployment results
+              </caption>
+              <thead>
+                <tr>
+                  <th scope="col">Claim</th>
+                  <th scope="col">Evidence</th>
+                  <th scope="col">Scope</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>40 local windows, four global stores</td>
+                  <td>Released layer and source-index configuration</td>
+                  <td>Backbone structure; does not count drafter blocks.</td>
+                </tr>
+                <tr>
+                  <td>890 global bytes per context token</td>
+                  <td>Model card and <a href="#cache">format accounting below</a></td>
+                  <td>Main and indexer global caches including specified scales. Local payload and runtime overhead are separate.</td>
+                </tr>
+                <tr>
+                  <td>Nearly half the long-prompt prefill work</td>
+                  <td>Report &sect;2.2 / &sect;3.2.2; equal-layer illustration above</td>
+                  <td>Optimized CED with bounded replay. The plot counts executions, not measured end-to-end latency.</td>
+                </tr>
+                <tr>
+                  <td>About 1/4 runtime KV and 1/8 persistent KV versus V4 Flash</td>
+                  <td>Report introduction and &sect;3.2.1, same-length / identical-workload comparisons</td>
+                  <td>Combines sharing, FP4, and deployment policy. Removing persistent SWA accounts for part of the 1/8 result.</td>
+                </tr>
+                <tr>
+                  <td>Mega-mHC halves activation traffic</td>
+                  <td>Report &sect;2.4.1</td>
+                  <td>Residual module versus the original four-kernel implementation; not total-model traffic.</td>
+                </tr>
+                <tr>
+                  <td>Engram adds 196B learned table parameters</td>
+                  <td>Report and released row counts</td>
+                  <td>Sparse capacity is explicit. The report does not isolate Engram's accuracy gain in an ablation.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="reading-notes closing-notes">
+            <article class="reading-note" style="--accent: var(--residual)">
+              <h3>Follow the sequential state</h3>
+              <p>Layer 30 consumes Layer 29's output. Four residual streams continue through the entire stack.</p>
+            </article>
+            <article class="reading-note" style="--accent: var(--decoder)">
+              <h3>Name the memory producer</h3>
+              <p>Local KV belongs to each layer. Global KV and selection have separate owners. Engram holds persistent model weights.</p>
+            </article>
+            <article class="reading-note" style="--accent: var(--encoder)">
+              <h3>Name the execution mode</h3>
+              <p>Prompt prefill can replay a short decoder tail. Generated tokens and teacher-forced training positions run all 40 layers.</p>
+            </article>
+          </div>
+          <p class="source-note">
+            <a href="https://arxiv.org/html/2609.19969v1#S3.SS1">Report &sect;3.1</a> and
+            <a href="https://github.com/pytorch/torchtitan/tree/main/torchtitan/models/deepseek_v4">TorchTitan V4 implementation</a>. The reuse table
+            is an implementation assessment.
+          </p>
+        </section>
+
         <section id="parameters">
+          <div class="eyebrow">Reference / Capacity accounting</div>
           <h2>Two kinds of model capacity</h2>
           <p class="section-lede">
             The backbone stores most of its weights in routed expert matrices. Engram adds a second form of sparsity: token-addressed table rows. Both
@@ -492,6 +1095,7 @@
         </section>
 
         <section id="cache">
+          <div class="eyebrow">Reference / Serving cache accounting</div>
           <h2>Reconstruct the 890-byte global cache</h2>
           <p class="section-lede">
             The three encoder producers each retain one entry per pair of tokens; the decoder producer retains one per token. That is about 2.5 global
@@ -580,155 +1184,6 @@
           </p>
         </section>
 
-        <section id="extensions">
-          <h2>The other pieces of the design</h2>
-          <p class="section-lede">
-            CED and CSA2 target long-context compute and cache storage. These additions address residual traffic, numerical formats, vision, and
-            generation throughput.
-          </p>
-          <div class="extension-grid">
-            <article class="extension card" style="--accent: var(--residual)">
-              <span class="label">Depth / residual mixing</span>
-              <h3>Single-Pass mHC</h3>
-              <p>
-                Each sublayer predicts input, output, and residual mixing coefficients. The input mix used now comes from the previous sublayer,
-                removing a reduction dependency from the critical path.
-              </p>
-              <div class="formula">X[l+1] = B[l] X[l] + C[l] F(A[l-1] X[l])</div>
-              <p>
-                Mega-mHC fuses residual update, input mixing, coefficient prediction, pre-norm, and FP8 conversion. The report halves mHC activation
-                traffic relative to its original implementation; this is a residual-module saving.
-              </p>
-              <p>The final stream merge consumes the carried mixing coefficients too.</p>
-            </article>
-            <article class="extension card" style="--accent: var(--decoder)">
-              <span class="label">Precision / cache layout</span>
-              <h3>FP4 main KV</h3>
-              <p>Quantize the full 512-channel latent after RoPE into E2M1, with one E4M3 scale per 16 channels and no second-level global scale.</p>
-              <div class="formula">512 &times; 4 bits + 32 &times; 8-bit scales<br />= 288 bytes per main KV entry</div>
-              <p>
-                Attention dequantizes cached values before using them. Main KV QAT is introduced during post-training. Local SWA KV stays FP8 because
-                it is more sensitive to quantization.
-              </p>
-            </article>
-            <article class="extension card" style="--accent: var(--vision)">
-              <span class="label">Native multimodal input</span>
-              <h3>DeepSeek-ViT</h3>
-              <p>
-                A 32-layer, width-1024 ViT uses 16 heads, 2D RoPE, RMSNorm, and SwiGLU. Linear patch embedding keeps the projection compatible with
-                Muon.
-              </p>
-              <div class="formula">
-                1344&times;1344 image &rarr; 96&times;96 patches<br />3&times;3 unshuffle &rarr; 32&times;32 visual tokens<br />MLP projector &rarr;
-                5120 channels
-              </div>
-              <p>
-                At that resolution, 9,216 patch tokens become 1,024 language-model visual tokens. Image and text expert routing have separate
-                load-balancing correction biases.
-              </p>
-            </article>
-            <article class="extension card" style="--accent: var(--moe)">
-              <span class="label">Generation / speculation</span>
-              <h3>DSpark</h3>
-              <p>
-                Three drafter blocks produce base logits for five draft positions in parallel. A lightweight Markov head models token dependencies; a
-                confidence head estimates acceptance probabilities.
-              </p>
-              <div class="formula">3 draft blocks &rarr; 5 positions<br />Confidence + engine load &rarr; verification length</div>
-              <p>
-                The scheduler adapts verification length to expected system throughput. DSpark is trained after backbone pre-training, then kept
-                aligned during post-training without sending its objective's gradients into the backbone.
-              </p>
-            </article>
-          </div>
-          <p class="source-note">
-            <a href="https://arxiv.org/html/2609.19969v1#S2.SS4">Report &sect;2.4</a> and
-            <a href="https://arxiv.org/html/2609.19969v1#S2.SS1.SSS1">&sect;2.1.1</a>.
-          </p>
-        </section>
-
-        <section id="training">
-          <h2>Training needs explicit ownership and lifetimes</h2>
-          <p class="section-lede">
-            The report pre-trains on 45T multimodal tokens, using sparse attention from the start at 64K context. Context expands to 1M at 34T tokens.
-            Teacher-forced execution keeps the full 40-layer graph; shared activations introduce distributed responsibilities.
-          </p>
-          <div class="training-grid">
-            <article class="card">
-              <span class="label">Shared attention state</span>
-              <h3>Carry values and their gradients</h3>
-              <p>
-                Shared KV, indexer keys, and selections can cross pipeline stages. Per-microbatch state tracks their consumers through forward,
-                recomputation, and backward, retaining them until the last consumer finishes.
-              </p>
-            </article>
-            <article class="card">
-              <span class="label">Engram parallelism</span>
-              <h3>Shard rows, prefetch lookups</h3>
-              <p>
-                Dedicated process groups own table row partitions. Prefetch begins before stage microbatches. Lookup gradients are buffered and
-                returned to their owning ranks after backbone backward; optimizer states are further sharded.
-              </p>
-            </article>
-            <article class="card">
-              <span class="label">Optimizer allocation</span>
-              <h3>Match updates to the matrices</h3>
-              <p>
-                Backbone linear matrices use Muon, with head-wise treatment for Q/K. Engram tables, token embeddings, and prediction heads use
-                momentum plus Sinkhorn balancing. RMSNorm and other non-matrix parameters use AdamW.
-              </p>
-            </article>
-          </div>
-          <h3 style="margin-top: 32px">What this means for existing V4 code</h3>
-          <div class="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th scope="col">Piece</th>
-                  <th scope="col">Reusable foundation</th>
-                  <th scope="col">V4.1 integration work</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr>
-                  <td>Attention kernel</td>
-                  <td>Gather local + selected global latents and normalize with the sink</td>
-                  <td>Support packed FP4 reads and the chosen layout; expose shared KV and supplied selections</td>
-                </tr>
-                <tr>
-                  <td>Compressor / indexer</td>
-                  <td>Projection, normalization, pooling, and Top-K primitives</td>
-                  <td>Ratio 2 encoder / ratio 1 global decoder; new indexer K source, three modes, hierarchical candidates</td>
-                </tr>
-                <tr>
-                  <td>MoE / residuals</td>
-                  <td>Routed and shared experts; Sinkhorn and residual combination math</td>
-                  <td>Modality-specific routing biases; carried Single-Pass mHC input coefficients</td>
-                </tr>
-                <tr>
-                  <td>Model / distributed runtime</td>
-                  <td>Common decoder, linear, normalization, and sharding infrastructure</td>
-                  <td>CED source relationships, shared-state ownership and gradients, new checkpoint mappings</td>
-                </tr>
-                <tr>
-                  <td>Engram / vision / drafter</td>
-                  <td>Embedding, ViT, and transformer building blocks</td>
-                  <td>New table lookup integration, DeepSeek vision configuration, and DSpark algorithm</td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-          <p class="note">
-            The existing TorchTitan V4 attention wrapper selects CSA for ratio 4, HCA for other compressed ratios, and local-only attention for ratio
-            1. V4.1 requires indexed global attention at both ratios 2 and 1, so the model needs new control flow and configuration wiring.
-          </p>
-          <p class="source-note">
-            <a href="https://arxiv.org/html/2609.19969v1#S3.SS1">Report &sect;3.1</a> and
-            <a href="https://github.com/pytorch/torchtitan/tree/main/torchtitan/models/deepseek_v4">TorchTitan V4 implementation</a>. The reuse table
-            is an implementation assessment.
-          </p>
-        </section>
-
         <section class="sources" id="sources">
           <h2>Sources and accounting notes</h2>
           <ol>
@@ -755,14 +1210,20 @@
               quantization blocks, and shared attention interfaces.
             </li>
             <li>
+              <a href="https://arxiv.org/abs/2606.19348">DeepSeek V4 technical report</a> and
+              <a href="https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash/blob/main/config.json">V4 Flash configuration</a>: the previous generation
+              used in the architecture and systems comparison.
+            </li>
+            <li>
               <a href="./kimi-k3.html">The Kimi K3 architecture study</a> supplies this page's presentation style. The logical kernel-diagram format
               follows the approach of <a href="https://deepseek-v3.ezyang.com/studies/01-deepseek-diagram.html">Edward Yang's DeepSeek diagram</a>.
             </li>
           </ol>
           <p class="fine-print">
-            Source review: October 26, 2026. Calculations use one context and one logical model copy. Global KV includes specified quantization
-            scales; local KV counts FP8 payload. The CED work plot is an equal-layer execution illustration, not a performance benchmark. Engram
-            addressing and gating controls are schematic examples, not model inference.
+            Source review: November 2, 2026. Calculations use one context and one logical model copy. Global KV includes specified quantization
+            scales; local KV counts FP8 payload. The CED work plot is an equal-layer execution illustration, not a performance benchmark. The CSA2
+            worked example uses reduced sizes and invented scores. Engram controls and the SwiGLU scalar plot illustrate their mechanisms without
+            running model inference.
           </p>
           <nav class="series-footer" aria-label="Related studies">
             <a href="./kimi-k3.html">Related: Kimi K3 architecture &rarr;</a>
