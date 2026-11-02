@@ -3,6 +3,7 @@
   const { D, H, K, Z, F, experts, topK } = A;
   const sum = (items, get) => items.reduce((total, item) => total + get(item), 0);
   const defaults = {
+    world: 512,
     pp: 8,
     cp: 1,
     ep: 64,
@@ -93,7 +94,7 @@
 
   function calculate(input = {}) {
     const config = { ...defaults, ...input };
-    for (const key of ["pp", "cp", "ep", "seq", "rows", "mbs", "segments", "domain", "kdaChunk"])
+    for (const key of ["world", "pp", "cp", "ep", "seq", "rows", "mbs", "segments", "domain", "kdaChunk"])
       if (!Number.isInteger(config[key]) || config[key] <= 0) throw new RangeError(`${key} must be a positive integer.`);
     if ((config.pp - 1) * Math.ceil(A.layers.length / config.pp) >= A.layers.length)
       throw new RangeError("The contiguous PP split cannot create empty stages.");
@@ -106,8 +107,8 @@
       ppLink: ["network", "nvlink"],
     }))
       if (!values.includes(config[key])) throw new RangeError(`Unknown ${key} policy.`);
-    if (!Number.isInteger(512 / (config.pp * config.cp))) throw new RangeError("PP x CP must divide the 512-GPU world.");
-    const stageRanks = 512 / config.pp;
+    if (!Number.isInteger(config.world / (config.pp * config.cp))) throw new RangeError("PP x CP must divide the configured GPU count.");
+    const stageRanks = config.world / config.pp;
     if (experts % config.ep || stageRanks % config.ep) throw new RangeError("EP must divide 896 experts and the ranks of one PP stage.");
     for (const key of ["gemm", "fp8Gemm", "hbm", "nvl", "network"])
       if (!Number.isFinite(config[key]) || config[key] <= 0) throw new RangeError(`${key} must be a positive finite rate.`);
@@ -235,7 +236,7 @@
     const causalModelFlops = stageRanks * sum(stages, (stage) => stage.learnedModelFlops + stage.coreModelFlops);
     const issuedFlops = stageRanks * sum(stages, (stage) => stage.learnedIssuedFlops + stage.coreIssuedFlops);
     const conventionPerToken = 6 * A.activeParams + 69 * 18 * H * K * K + 24 * 6 * H * (192 + 128) * config.seq;
-    const tokensPerGPUUpdate = globalTokens / 512;
+    const tokensPerGPUUpdate = globalTokens / config.world;
     // Neither measured throughput nor backend-specific communication sets the compute ceiling.
     const computeTokensPerSecondPerGPU = tokensPerGPUUpdate / computeSeconds;
     const resourceTokensPerSecondPerGPU = tokensPerGPUUpdate / sketchSeconds;
@@ -258,6 +259,7 @@
       computeTokensPerSecondPerGPU,
       computeModelTFLOPsPerGPU: (computeTokensPerSecondPerGPU * conventionPerToken) / 1e12,
       resourceTokensPerSecondPerGPU,
+      resourceModelTFLOPsPerGPU: (resourceTokensPerSecondPerGPU * conventionPerToken) / 1e12,
       globalRows: dp * config.mbs * config.rows,
       rounds,
       copies,

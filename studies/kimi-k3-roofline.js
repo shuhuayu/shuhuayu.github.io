@@ -17,7 +17,7 @@
   }
 
   function normalizeAxes() {
-    const ranks = 512 / Number(controls.pp.value);
+    const ranks = Number(controls.world.value) / Number(controls.pp.value);
     const changes = [];
     for (const key of ["cp", "ep", "domain"]) {
       const control = controls[key];
@@ -331,7 +331,7 @@
     }
     current = R.calculate(readConfig());
     const c = current.config;
-    const notices = changes.map((change) => `Adjusted to fit the 512-GPU mesh: ${change}.`);
+    const notices = changes.map((change) => `Adjusted to fit the ${c.world}-GPU mesh: ${change}.`);
     if (c.cp > 1) notices.push("CP attention communication is not priced. The long-context time sketch is incomplete.");
     if (c.policy === "retain")
       notices.push(
@@ -343,26 +343,11 @@
     warning.textContent = notices.join(" ");
     text(
       "roof-shape",
-      `512 = PP${c.pp} x CP${c.cp} x DP${current.dp}; dense FSDP${current.stageRanks}; EP${c.ep} x expert FSDP${current.expertFsdp}. T_local = ${
-        c.rows
-      } x ${number(c.seq, 0)} / ${c.cp} = ${number(current.tokens, 0)}. FP32 state / ${
+      `${c.world} = PP${c.pp} x CP${c.cp} x DP${current.dp}; dense FSDP${current.stageRanks}; EP${c.ep} x expert FSDP${
+        current.expertFsdp
+      }. T_local = ${c.rows} x ${number(c.seq, 0)} / ${c.cp} = ${number(current.tokens, 0)}. FP32 state / ${
         c.precision === "mxfp8-experts" ? "MXFP8 routed GEMMs, BF16 elsewhere" : "BF16 GEMMs"
       }.`
-    );
-    text("headline-gemm", `${number(c.gemm, 0)} TF/s`);
-    text("headline-hbm", `${number(c.hbm)} TB/s`);
-    text("headline-compute", `${number(current.computeTokensPerSecondPerGPU, 0)} tok/s/GPU`);
-    get("headline-compute").dataset.throughput = current.computeTokensPerSecondPerGPU;
-    text(
-      "headline-detail",
-      `${number(current.tokensPerGPUUpdate, 0)} tokens per GPU per update / ${seconds(current.computeSeconds)} ideal slowest-stage compute = ${number(
-        current.computeTokensPerSecondPerGPU,
-        0
-      )} tokens/s/GPU (${number(current.computeModelTFLOPsPerGPU, 1)} conventional model TFLOP/s/GPU). ${
-        c.precision === "mxfp8-experts" ? "MXFP8 routed experts; other contractions BF16. " : "BF16 contractions. "
-      }${
-        c.ac === "full" ? "Full layer recompute. " : "No layer recompute. "
-      }Communication, pipeline and optimizer are outside this compute-only ceiling; no training measurements are used.`
     );
     text("roof-tokens", `${number(current.globalTokens / 1e6)}M`);
     get("roof-tokens").dataset.tokens = current.globalTokens;
@@ -377,11 +362,15 @@
       )} balanced routed assignments per input-rank equivalent. Expected rows, no token dropping.`
     );
     text("roof-sketch", seconds(current.sketchSeconds));
+    text("roof-recipe-throughput", `${number(current.resourceTokensPerSecondPerGPU, 0)} tokens/s/GPU`);
+    get("roof-recipe-throughput").dataset.throughput = current.resourceTokensPerSecondPerGPU;
+    text("roof-recipe-tflops", `${number(current.resourceModelTFLOPsPerGPU, 1)} model TFLOP/s/GPU`);
+    get("roof-recipe-tflops").dataset.tflops = current.resourceModelTFLOPsPerGPU;
     text(
       "roof-sketch-detail",
-      `${number(current.resourceTokensPerSecondPerGPU, 0)} tokens/s/GPU from selected byte budgets + nominal 1F1B bubble. ${
+      `For this configured recipe: max(compute/HBM, shared NVLink, shared NIC) + nominal ordinary-1F1B bubble. ${
         c.cp > 1 ? "CP communication omitted. " : ""
-      }Optimizer and non-matmul service omitted; not measured.`
+      }Optimizer and non-matmul service omitted; optimistic analytic model, not measured training throughput.`
     );
     renderRoofline(current);
     renderFlops(current);
@@ -396,7 +385,7 @@
 
   const presets = {
     baseline: {},
-    mxfp8: { precision: "mxfp8-experts", policy: "retain" },
+    mxfp8: { precision: "mxfp8-experts" },
     ep1: { ep: 1 },
     split: { domain: 8 },
     long: { seq: 65536, cp: 16 },
@@ -472,6 +461,7 @@
             computeOnlyTokensPerSecondPerGPU: current.computeTokensPerSecondPerGPU,
             computeOnlyModelTFLOPsPerGPU: current.computeModelTFLOPsPerGPU,
             resourceModelTokensPerSecondPerGPU: current.resourceTokensPerSecondPerGPU,
+            resourceModelTFLOPsPerGPU: current.resourceModelTFLOPsPerGPU,
             computeSeconds: current.computeSeconds,
             nvlSeconds: current.nvlSeconds,
             networkSeconds: current.networkSeconds,
@@ -497,6 +487,7 @@
   get("export-csv").addEventListener("click", () => {
     const header = [
       "pp_rank",
+      "gpu_count",
       "pp_degree",
       "cp_degree",
       "ep_degree",
@@ -529,6 +520,7 @@
     const c = current.config;
     const rows = current.stages.map((stage) => [
       stage.rank,
+      c.world,
       c.pp,
       c.cp,
       c.ep,

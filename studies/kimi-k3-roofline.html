@@ -6,15 +6,15 @@
     <meta name="robots" content="noindex, follow" />
     <meta
       name="description"
-      content="A Kimi K3 hardware-and-configuration roofline using Edward Yang's practical Blackwell SOL rates: BF16 and routed-expert MXFP8 compute ceilings, with separate communication and pipeline budgets."
+      content="Configure a Kimi K3 training recipe and calculate its roofline from practical hardware rates, compute, communication and pipeline costs. Default: 512 GB200 GPUs."
     />
-    <title>Roofline: Kimi K3 on GB200</title>
+    <title>Kimi K3: recipe-to-roofline calculator</title>
     <link rel="stylesheet" href="./kimi-k3-memory.css" />
     <link rel="stylesheet" href="./kimi-k3-series.css" />
     <link rel="stylesheet" href="./kimi-k3-roofline.css" />
     <script src="./kimi-k3-accounting.js?v=memory-2" defer></script>
-    <script src="./kimi-k3-roofline-model.js?v=roofline-3" defer></script>
-    <script src="./kimi-k3-roofline.js?v=roofline-3" defer></script>
+    <script src="./kimi-k3-roofline-model.js?v=roofline-4" defer></script>
+    <script src="./kimi-k3-roofline.js?v=roofline-4" defer></script>
   </head>
   <body>
     <main class="page">
@@ -27,31 +27,21 @@
       </nav>
       <header>
         <div class="eyebrow">Kimi K3 studies / 03</div>
-        <h1>Working the roofline<br />for Kimi K3 on GB200</h1>
-        <p class="dek">Start from practical hardware rates and the training configuration. Count the work, then the bytes.</p>
+        <h1>Choose a recipe.<br />Work its roofline.</h1>
+        <p class="dek">Configure the parallelism, batch, precision and hardware. Calculate the roofline for that recipe.</p>
         <p>
           <a href="./kimi-k3.html">Study 01</a> followed the tensor shapes. <a href="./kimi-k3-memory.html">Study 02</a> budgeted the live copies.
           This study turns those shapes into an analytic roofline: FLOPs divided by hardware rates, operand bytes divided by bandwidth, and the
-          configured parallelism and recomputation. Measured training throughput is a separate comparison, never an input to the theoretical ceiling.
-        </p>
-        <div class="headline-stats">
-          <div><strong>512</strong><span>GB200 GPUs / FP32 master and state</span></div>
-          <div><strong id="headline-gemm">1,800 TF/s</strong><span>practical BF16 SOL rate per GPU</span></div>
-          <div><strong id="headline-hbm">8 TB/s</strong><span>selected HBM bandwidth per GPU</span></div>
-          <div><strong id="headline-compute">2,062 tok/s/GPU</strong><span>compute-only ceiling / practical SOL rates</span></div>
-        </div>
-        <p id="headline-detail" class="note">
-          Default BF16 / FullAC: 32,768 tokens per GPU per update / 15.893 s ideal slowest-stage compute = 2,062 tokens/s/GPU. Communication, pipeline
-          bubbles and the optimizer can only lower end-to-end throughput relative to this compute-only model.
+          configured parallelism and recomputation. There is no universal throughput number: every result belongs to the selected recipe. Measured
+          training throughput is a separate comparison, never an input to the analytic model.
         </p>
         <p class="scope">
-          Default: PP8 / CP1 / TP1 / dense FSDP64 / EP64, FP32 master weights, gradients and Muon momentum, BF16 model GEMMs, full layer
-          checkpointing, one 4K row per microbatch, 64 microbatches. The separate pipeline model is ordinary 1F1B. The headline has no MoE-backend or
-          measured-throughput input; backend-specific metadata is optional in the communication ledger. CUDA graphs do not change the analytic FLOP
-          and byte counts; their CPU/launch-overhead benefit is outside this model.
+          <a href="#lab">Configure your recipe in the calculator</a>, starting from the default GB200 setup. Its results include the modeled
+          compute/HBM, communication and pipeline constraints. CUDA graphs do not change analytic FLOP and byte counts; CPU/launch overhead and memory
+          feasibility need separate validation.
         </p>
         <nav class="jump-links" aria-label="Sections">
-          <a href="#hardware">Hardware ceilings</a><a href="#lab">Roofline lab</a><a href="#flops">Counting FLOPs</a
+          <a href="#lab">Recipe calculator</a><a href="#hardware">Hardware inputs</a><a href="#flops">Counting FLOPs</a
           ><a href="#communication">Counting bytes</a> <a href="#pipeline">Pipeline cost</a><a href="#muon">Muon cost</a
           ><a href="#reality">Measured reality</a>
         </nav>
@@ -117,9 +107,9 @@
         <p>
           The inputs are synchronized with <a href="https://deepseek-v3.ezyang.com/studies/kimi-k3.html">Edward Yang's current K3 analysis</a>:
           practical sustained targets of 1.8 PFLOP/s BF16 and 3.6 PFLOP/s MXFP8, 900 GB/s one-way NVLink, and 100 GB/s scale-out. His sustained
-          compute targets are empirically informed model inputs, not NVIDIA's spec peaks. We apply that rate set to the configured 512-GPU layout; it
-          is not a claim that GB200 and GB300 have identical sustained performance or that this GB200 cluster supplies his NIC budget. FLOPs, bytes
-          and time remain analytically derived; measured end-to-end throughput and FakePG runtime are not used to fit the result.
+          compute targets are empirically informed model inputs, not NVIDIA's spec peaks. We apply that rate set to the configured layout; it is not a
+          claim that GB200 and GB300 have identical sustained performance or that this GB200 cluster supplies his NIC budget. FLOPs, bytes and time
+          remain analytically derived; measured end-to-end throughput and FakePG runtime are not used to fit the result.
         </p>
         <div class="equation-pair">
           <article class="card">
@@ -143,27 +133,75 @@ For every GEMM phase: forward, DGRAD, WGRAD, and any checkpoint replay
 
 T_stage   = sum(t_op) + attention_core_FLOPs / BF16_SOL_rate
 T_compute = max over PP stages(T_stage)
-rho_compute = global_tokens_per_update / (512 * T_compute)
+rho_compute = global_tokens_per_update / (GPU_count * T_compute)
 
 Separate distributed model:
   T_resource = max(T_compute, shared_NVLink_service, shared_NIC_service)
-  T_step_model = T_resource + nominal_pipeline_bubble</pre
+  T_step_model = T_resource + nominal_pipeline_bubble
+  rho_recipe = global_tokens_per_update / (GPU_count * T_step_model)
+  model_TFLOPs_per_GPU = rho_recipe * conventional_FLOPs_per_token / 1e12</pre
         >
         <p>
-          The headline is rho<sub>compute</sub>, an optimistic compute-only ceiling under the selected operation and memory-traffic assumptions. It
-          does not depend on HybridEP, Dist-MoE, measured tokens/s or FakePG timings. The end-to-end model additionally depends on the bytes required
-          by the selected communication protocol, topology and schedule. Neither ceiling proves that the configuration fits memory.
+          The calculator reports rho<sub>recipe</sub> and its conventional model TFLOP/s/GPU for the configured recipe, not a compute-only headline.
+          Compute/HBM, shared-link service and the nominal pipeline bubble are its ingredients. The communication protocol, topology and lifecycle are
+          explicit inputs, not a fit to HybridEP, Dist-MoE, measured tokens/s or FakePG timings. This is an optimistic accounting model, not a
+          complete schedule simulation: optimizer and non-matmul service are omitted, and CP-specific communication is not yet priced. The result is
+          not proof that the configuration fits memory.
         </p>
       </section>
 
       <section id="lab">
         <div class="eyebrow">Change a shape, watch a roof move</div>
-        <h2>The roofline lab</h2>
+        <h2>Configure a recipe and calculate its roofline</h2>
         <p>
-          The lab is an accounting model, not a launch-config generator. Every run has 512 GPUs and TP1. Changing rows or microbatches changes the
-          global batch; changing CP changes the number of independent data replicas. Memory feasibility still needs
+          Start with the default 512-GB200 recipe below, then choose your own GPU count, parallelism, batch, precision, lifecycle and hardware rates.
+          Every result updates from those inputs. The current model supports TP1 and ordinary 1F1B with one contiguous stage per rank, not virtual
+          pipeline schedules. Changing rows or microbatches changes the global batch; changing CP changes the number of independent data replicas.
+          Memory feasibility still needs
           <a href="./kimi-k3-memory.html#lab">its own budget</a>.
         </p>
+        <details class="fold">
+          <summary>Default analyzed recipe: 512 GB200 GPUs</summary>
+          <div class="table-scroll card">
+            <table id="default-recipe">
+              <thead>
+                <tr>
+                  <th>Field</th>
+                  <th>Default recipe</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>Parallelism</td>
+                  <td>PP8 / CP1 / TP1 / DP64 / EP64; dense FSDP64, expert FSDP1</td>
+                </tr>
+                <tr>
+                  <td>Batch</td>
+                  <td>One 4,096-token row per microbatch; 64 microbatches in one schedule; 16,777,216 tokens/update</td>
+                </tr>
+                <tr>
+                  <td>Precision</td>
+                  <td>FP32 master weights, gradient accumulation/reduction and optimizer state; BF16 compute throughout</td>
+                </tr>
+                <tr>
+                  <td>Recomputation and schedule</td>
+                  <td>Full layer recomputation; ordinary 1F1B; one contiguous stage per rank</td>
+                </tr>
+                <tr>
+                  <td>FSDP communication model</td>
+                  <td>65 BF16 weight all-gathers and one FP32 gradient reduce-scatter per update</td>
+                </tr>
+                <tr>
+                  <td>Routing and placement</td>
+                  <td>Balanced routing without token dropping; EP64 inside one NVLink domain; PP over the scale-out link</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <p class="note">
+            This is the calculator's default analyzed configuration, not a launch recipe or a claim of optimality. Hardware inputs are below.
+          </p>
+        </details>
         <div class="preset-bar" aria-label="Illustrative roofline scenarios">
           <button type="button" data-preset="baseline">4K BF16 / Edward's SOL rates</button
           ><button type="button" data-preset="mxfp8">4K MXFP8 experts / Edward's SOL rates</button
@@ -172,6 +210,16 @@ Separate distributed model:
           <button type="button" data-preset="retain">Retain compute views</button>
         </div>
         <form id="roof-controls" class="card controls" onsubmit="return false">
+          <label
+            >GPU count<select id="roof-world">
+              <option>64</option>
+              <option>128</option>
+              <option>256</option>
+              <option selected>512</option>
+              <option>1024</option>
+              <option>2048</option>
+            </select></label
+          >
           <label
             >PP ranks<select id="roof-pp">
               <option>1</option>
@@ -294,19 +342,50 @@ Separate distributed model:
         </form>
         <p id="roof-warning" class="warning" role="status" hidden></p>
         <p id="roof-shape" class="shape-caption"></p>
-        <div class="result-grid roof-results" aria-live="polite">
-          <article class="card">
-            <span class="eyebrow">Tokens / update</span><strong id="roof-tokens" class="big-number"></strong>
-            <p id="roof-batch"></p>
-          </article>
-          <article class="card">
-            <span class="eyebrow">Rows / local expert</span><strong id="roof-expert-rows" class="big-number"></strong>
-            <p id="roof-expert-detail"></p>
-          </article>
-          <article class="card">
-            <span class="eyebrow">Resource + pipeline time model</span><strong id="roof-sketch" class="big-number"></strong>
-            <p id="roof-sketch-detail"></p>
-          </article>
+        <div class="table-scroll card" aria-live="polite">
+          <table id="roof-recipe-results">
+            <caption>
+              Roofline for the configured recipe
+            </caption>
+            <thead>
+              <tr>
+                <th>Quantity</th>
+                <th>Recipe-specific result</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Tokens/update</td>
+                <td>
+                  <span id="roof-tokens">16.78M</span>
+                  <p id="roof-batch"></p>
+                </td>
+              </tr>
+              <tr>
+                <td>Expected rows/local expert</td>
+                <td>
+                  <span id="roof-expert-rows">4,681.14</span>
+                  <p id="roof-expert-detail"></p>
+                </td>
+              </tr>
+              <tr>
+                <td>Resource + nominal pipeline time</td>
+                <td id="roof-sketch">17.631 s</td>
+              </tr>
+              <tr>
+                <td>Recipe roofline, tokens/s/GPU</td>
+                <td id="roof-recipe-throughput">1,859 tokens/s/GPU</td>
+              </tr>
+              <tr>
+                <td>Recipe roofline, model TFLOP/s/GPU</td>
+                <td id="roof-recipe-tflops">1,199.1 model TFLOP/s/GPU</td>
+              </tr>
+            </tbody>
+          </table>
+          <p id="roof-sketch-detail" class="note">
+            Default recipe: compute/HBM and shared-link service, plus a nominal ordinary-1F1B bubble. Optimizer and non-matmul service omitted; not
+            measured training throughput.
+          </p>
         </div>
         <figure class="card roof-figure">
           <div class="chart-title"><strong>Forward GEMMs: precision-specific HBM rooflines</strong><span id="roof-ridge"></span></div>
@@ -476,10 +555,10 @@ Payload bytes = exchanges * local_tokens * latent_width * 2 * remote_copies</pre
         <h3>The extra HybridEP all-gather is not an expert weight gather</h3>
         <p>
           This is an optional, backend-specific addition, disabled in the default payload-only ledger. It is not a requirement of K3's expert
-          computation or an input to the headline compute ceiling. The 4K reference exchanges a Boolean routing map [4,096, 896] before dispatch: 3.5
-          MiB locally, 224 MiB gathered across EP64, of which 220.5 MiB came from other ranks. The original and recomputed forward each do it. On a
-          12-MoE-layer stage, 64 microbatches &times; 12 layers &times; 2 = 1,536 metadata all-gathers per update. Small inputs can thus imply a
-          substantial global output and a repeated dependency.
+          computation or an input to compute service. The 4K reference exchanges a Boolean routing map [4,096, 896] before dispatch: 3.5 MiB locally,
+          224 MiB gathered across EP64, of which 220.5 MiB came from other ranks. The original and recomputed forward each do it. On a 12-MoE-layer
+          stage, 64 microbatches &times; 12 layers &times; 2 = 1,536 metadata all-gathers per update. Small inputs can thus imply a substantial global
+          output and a repeated dependency.
         </p>
         <div class="dependency-chain" aria-label="The routing-map data dependency">
           <span>Router / top-k</span><b aria-hidden="true">&#8594;</b><span class="dependency-comm">Routing-map all-gather</span
@@ -488,8 +567,9 @@ Payload bytes = exchanges * local_tokens * latent_width * 2 * remote_copies</pre
         </div>
         <h3>FSDP counts depend on the lifecycle, not just the acronym</h3>
         <p>
-          At PP8/EP64, routed experts have expert FSDP1: there is no routed-weight FSDP gather. Dense weights are sharded over 64 ranks. A BF16 ring
-          all-gather receives 2P(1 &minus; 1/n) bytes per rank; an FP32 reduce-scatter has the corresponding 4P(1 &minus; 1/n) budget. Multiply by the
+          At the default 512-GPU PP8/EP64 layout, routed experts have expert FSDP1: there is no routed-weight FSDP gather. Dense weights are sharded
+          over 64 ranks. A BF16 ring all-gather receives 2P(1 &minus; 1/n) bytes per rank; an FP32 reduce-scatter has the corresponding 4P(1 &minus;
+          1/n) budget. Multiply by the
           <em>actual</em> number of collectives.
         </p>
         <div class="table-scroll card">
@@ -673,8 +753,8 @@ Payload bytes = exchanges * local_tokens * latent_width * 2 * remote_copies</pre
         <p>
           The fixed 512-GB200 HybridEP references below completed 12 updates with FP32 resident/master weights and optimizer states, BF16 compute,
           full checkpointing, PP8/FSDP64/EP64, 64 microbatches, and no CUDA graphs. Clean throughput excludes the profiled update and trace-export
-          disturbance. These old backend-specific measurements stay fixed when you change the lab. They neither set the headline nor represent current
-          optimized Dist-MoE throughput.
+          disturbance. These old backend-specific measurements stay fixed when you change the lab. They neither set calculator results nor represent
+          current optimized Dist-MoE throughput.
         </p>
         <div class="table-scroll card">
           <table id="measured-runs">
