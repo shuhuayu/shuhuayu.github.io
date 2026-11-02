@@ -64,6 +64,8 @@
     const y = (tf) => bottom - (Math.log10(tf / 0.1) / Math.log10(50000)) * (bottom - top);
     const rate = result.config.gemm;
     const ridge = rate / result.config.hbm;
+    const expertRate = result.config.precision === "mxfp8-experts" ? result.config.fp8Gemm : rate;
+    const expertRidge = expertRate / result.config.hbm;
     const low = result.config.hbm;
     const roofPoints = `${left},${y(low)} ${x(ridge)},${y(rate)} ${right},${y(rate)}`;
     svg.appendChild(svgElement("path", { class: "plot-area", d: `M${left},${bottom} L${roofPoints.replaceAll(" ", " L")} L${right},${bottom} Z` }));
@@ -75,9 +77,18 @@
       svg.appendChild(svgElement("line", { class: "plot-grid", x1: left, x2: right, y1: y(tick), y2: y(tick) }));
       svg.appendChild(svgElement("text", { x: left - 12, y: y(tick) + 4, "text-anchor": "end" }, number(tick, 1)));
     }
-    svg.appendChild(svgElement("line", { class: "plot-ceiling", x1: left, x2: right, y1: y(2500), y2: y(2500) }));
-    svg.appendChild(svgElement("text", { x: right, y: y(2500) - 10, "text-anchor": "end" }, "Nominal dense BF16: 2,500 TF/s"));
+    svg.appendChild(svgElement("line", { class: "plot-ceiling", x1: left, x2: right, y1: y(rate), y2: y(rate) }));
+    svg.appendChild(svgElement("text", { x: right, y: y(rate) - 10, "text-anchor": "end" }, `Practical BF16 SOL: ${number(rate, 0)} TF/s`));
     svg.appendChild(svgElement("path", { class: "plot-roof", d: `M${roofPoints.replaceAll(" ", " L")}` }));
+    if (result.config.precision === "mxfp8-experts") {
+      const expertPoints = `${left},${y(low)} ${x(expertRidge)},${y(expertRate)} ${right},${y(expertRate)}`;
+      svg.appendChild(
+        svgElement("path", { class: "plot-roof", d: `M${expertPoints.replaceAll(" ", " L")}`, style: "stroke:var(--moe);stroke-dasharray:7 4" })
+      );
+      svg.appendChild(
+        svgElement("text", { x: right, y: y(expertRate) - 10, "text-anchor": "end" }, `MXFP8 expert roof: ${number(expertRate, 0)} TF/s`)
+      );
+    }
     svg.appendChild(
       svgElement(
         "text",
@@ -96,11 +107,13 @@
     const buttons = get("roof-gemm-buttons");
     buttons.replaceChildren();
     for (const [index, gemm] of result.forwardGemmPoints.entries()) {
-      const tf = Math.min(rate, result.config.hbm * gemm.intensity);
+      const tf = Math.min(gemm.rate, result.config.hbm * gemm.intensity);
       const chosen = selectedGemm === gemm.name;
       if (chosen) svg.appendChild(svgElement("circle", { class: "plot-halo", cx: x(gemm.intensity), cy: y(tf), r: 12 }));
       const dot = svgElement("circle", { class: `plot-dot${chosen ? " selected" : ""}`, cx: x(gemm.intensity), cy: y(tf), r: chosen ? 6 : 4 });
-      dot.appendChild(svgElement("title", {}, `${gemm.name}: ${number(gemm.intensity)} FLOP/B, ${number(tf)} TF/s roof, ${gemm.bound}-limited`));
+      dot.appendChild(
+        svgElement("title", {}, `${gemm.name} / ${gemm.precision}: ${number(gemm.intensity)} FLOP/B, ${number(tf)} TF/s roof, ${gemm.bound}-limited`)
+      );
       svg.appendChild(dot);
       if (chosen)
         svg.appendChild(svgElement("text", { class: "point-label", x: x(gemm.intensity), y: y(tf) + 26, "text-anchor": "middle" }, gemm.name));
@@ -118,12 +131,15 @@
     const inspector = get("roof-inspector");
     inspector.replaceChildren();
     const heading = document.createElement("h3");
-    heading.textContent = `${chosen.name}: [M,K] x [K,N], M=${number(chosen.m)}, K=${number(chosen.k, 0)}, N=${number(chosen.n, 0)}`;
+    heading.textContent = `${chosen.name} / ${chosen.precision}: [M,K] x [K,N], M=${number(chosen.m)}, K=${number(chosen.k, 0)}, N=${number(
+      chosen.n,
+      0
+    )}`;
     const stats = document.createElement("div");
     stats.className = "gemm-stats";
     for (const [value, label] of [
       [`${number(chosen.flops / 1e9)} GFLOP`, "One forward GEMM / one expert if grouped"],
-      [bytes(chosen.bytes), "Modeled BF16 operand traffic"],
+      [bytes(chosen.bytes), `Modeled ${chosen.precision} forward traffic`],
       [`${number(chosen.intensity)} FLOP/B`, `${chosen.bound}-limited at selected ceilings`],
       [`${number(chosen.seconds * 1e6)} us`, "Ideal one-GEMM service time / not measured"],
     ]) {
@@ -136,7 +152,7 @@
       stats.appendChild(box);
     }
     inspector.append(heading, stats);
-    text("roof-ridge", `Ridge: ${number(ridge)} FLOP/B`);
+    text("roof-ridge", `BF16 ridge: ${number(ridge)} FLOP/B${result.config.precision === "mxfp8-experts" ? ` / MXFP8: ${number(expertRidge)}` : ""}`);
   }
 
   function renderBars(id, rows, format) {
@@ -329,7 +345,24 @@
       "roof-shape",
       `512 = PP${c.pp} x CP${c.cp} x DP${current.dp}; dense FSDP${current.stageRanks}; EP${c.ep} x expert FSDP${current.expertFsdp}. T_local = ${
         c.rows
-      } x ${number(c.seq, 0)} / ${c.cp} = ${number(current.tokens, 0)}. FP32 state / BF16 GEMMs.`
+      } x ${number(c.seq, 0)} / ${c.cp} = ${number(current.tokens, 0)}. FP32 state / ${
+        c.precision === "mxfp8-experts" ? "MXFP8 routed GEMMs, BF16 elsewhere" : "BF16 GEMMs"
+      }.`
+    );
+    text("headline-gemm", `${number(c.gemm, 0)} TF/s`);
+    text("headline-hbm", `${number(c.hbm)} TB/s`);
+    text("headline-compute", `${number(current.computeTokensPerSecondPerGPU, 0)} tok/s/GPU`);
+    get("headline-compute").dataset.throughput = current.computeTokensPerSecondPerGPU;
+    text(
+      "headline-detail",
+      `${number(current.tokensPerGPUUpdate, 0)} tokens per GPU per update / ${seconds(current.computeSeconds)} ideal slowest-stage compute = ${number(
+        current.computeTokensPerSecondPerGPU,
+        0
+      )} tokens/s/GPU (${number(current.computeModelTFLOPsPerGPU, 1)} conventional model TFLOP/s/GPU). ${
+        c.precision === "mxfp8-experts" ? "MXFP8 routed experts; other contractions BF16. " : "BF16 contractions. "
+      }${
+        c.ac === "full" ? "Full layer recompute. " : "No layer recompute. "
+      }Communication, pipeline and optimizer are outside this compute-only ceiling; no training measurements are used.`
     );
     text("roof-tokens", `${number(current.globalTokens / 1e6)}M`);
     get("roof-tokens").dataset.tokens = current.globalTokens;
@@ -346,7 +379,9 @@
     text("roof-sketch", seconds(current.sketchSeconds));
     text(
       "roof-sketch-detail",
-      `Ideal rates + nominal 1F1B bubble. ${c.cp > 1 ? "CP communication omitted. " : ""}Optimizer and non-matmul service omitted; not measured.`
+      `${number(current.resourceTokensPerSecondPerGPU, 0)} tokens/s/GPU from selected byte budgets + nominal 1F1B bubble. ${
+        c.cp > 1 ? "CP communication omitted. " : ""
+      }Optimizer and non-matmul service omitted; not measured.`
     );
     renderRoofline(current);
     renderFlops(current);
@@ -361,6 +396,7 @@
 
   const presets = {
     baseline: {},
+    mxfp8: { precision: "mxfp8-experts", policy: "retain" },
     ep1: { ep: 1 },
     split: { domain: 8 },
     long: { seq: 65536, cp: 16 },
@@ -397,7 +433,7 @@
     row.dataset.reference = reference.seq === 2048 ? "v1" : reference.throughput === 370 ? "v1-5" : "v1-6";
     get("measured-runs").querySelector("tbody").appendChild(row);
   }
-  text("metadata-sol", `${number((R.calculate().metadataCall.nvl / (900 * 1e9)) * 1e3, 3)} ms`);
+  text("metadata-sol", `${number((R.calculate({ routingMap: "hybridep" }).metadataCall.nvl / (900 * 1e9)) * 1e3, 3)} ms`);
 
   function download(name, type, content) {
     const url = URL.createObjectURL(new Blob([content], { type }));
@@ -415,8 +451,11 @@
       "application/json",
       JSON.stringify(
         {
-          description: "Optimistic accounting sketch, not profiler data or a launch configuration. CP communication and non-matmul work omitted.",
-          precision: "FP32 master, gradient and optimizer state; BF16 model GEMMs and Muon Newton-Schulz working copy",
+          description:
+            "Theoretical hardware/configuration ceiling, not profiler data or a launch configuration. CP communication and non-matmul work omitted.",
+          precision: `FP32 master, gradient and optimizer state; ${
+            current.config.precision === "mxfp8-experts" ? "MXFP8 routed experts, BF16 other GEMMs" : "BF16 model GEMMs"
+          }; BF16 Muon Newton-Schulz working copy`,
           config: current.config,
           structural: { parameters: A.totalParams, activeParameterConvention: A.activeParams, learnedActiveMatrices: A.linearParams },
           derived: {
@@ -429,6 +468,10 @@
             causalModelFlops: current.causalModelFlops,
             modeledIssuedFlops: current.issuedFlops,
             conventionalFlopsPerToken: current.conventionPerToken,
+            tokensPerGPUUpdate: current.tokensPerGPUUpdate,
+            computeOnlyTokensPerSecondPerGPU: current.computeTokensPerSecondPerGPU,
+            computeOnlyModelTFLOPsPerGPU: current.computeModelTFLOPsPerGPU,
+            resourceModelTokensPerSecondPerGPU: current.resourceTokensPerSecondPerGPU,
             computeSeconds: current.computeSeconds,
             nvlSeconds: current.nvlSeconds,
             networkSeconds: current.networkSeconds,
@@ -462,6 +505,9 @@
       "microbatches",
       "documents_per_row",
       "layer_checkpoint",
+      "expert_precision",
+      "kda_chunk_size",
+      "routing_map",
       "fsdp_policy",
       "stage_ranks_per_nvl",
       "payload_copy_policy",
@@ -469,6 +515,7 @@
       "local_tokens",
       "global_tokens",
       "gemm_tflops",
+      "fp8_gemm_tflops",
       "hbm_tb_s",
       "nvl_gb_s",
       "network_gb_s",
@@ -490,6 +537,9 @@
       c.mbs,
       c.segments,
       c.ac,
+      c.precision,
+      c.kdaChunk,
+      c.routingMap,
       c.policy,
       c.domain,
       c.copies,
@@ -497,6 +547,7 @@
       current.tokens,
       current.globalTokens,
       c.gemm,
+      c.fp8Gemm,
       c.hbm,
       c.nvl,
       c.network,

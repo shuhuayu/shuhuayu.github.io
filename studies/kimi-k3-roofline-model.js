@@ -12,28 +12,58 @@
     segments: 1,
     ac: "full",
     policy: "reference",
+    precision: "bf16",
+    routingMap: "none",
+    kdaChunk: 64,
     domain: 64,
     copies: "assignment",
     ppLink: "network",
-    gemm: 2500,
+    // Practical SOL inputs from Edward Yang's current Blackwell/K3 analysis.
+    gemm: 1800,
+    fp8Gemm: 3600,
     hbm: 8,
     nvl: 900,
-    network: 50,
+    network: 100,
   };
 
   function gemmCost(gemm, config) {
     const { m, n, k } = gemm;
+    const mxfp8 = !!gemm.routed && config.precision === "mxfp8-experts";
+    const rate = mxfp8 ? config.fp8Gemm : config.gemm;
+    const operandBytes = mxfp8 ? 1 + 1 / 32 : 2;
+    const outputBytes = gemm.phase === "wgrad" ? 4 : 2;
     const flops = 2 * m * n * k;
-    const bytes = 2 * (m * k + k * n + m * n);
-    const compute = flops / (config.gemm * 1e12);
+    const bytes = operandBytes * (m * k + k * n) + outputBytes * m * n;
+    const compute = flops / (rate * 1e12);
     const memory = bytes / (config.hbm * 1e12);
-    return { ...gemm, flops, bytes, intensity: flops / bytes, seconds: Math.max(compute, memory), bound: memory > compute ? "HBM" : "Compute" };
+    return {
+      ...gemm,
+      precision: mxfp8 ? "MXFP8" : "BF16",
+      rate,
+      flops,
+      bytes,
+      intensity: flops / bytes,
+      seconds: Math.max(compute, memory),
+      bound: memory > compute ? "HBM" : "Compute",
+    };
+  }
+
+  function gemmPhases(gemm, config) {
+    const { m, n, k } = gemm;
+    const phases = [
+      { ...gemm, phase: "forward" },
+      { ...gemm, m, n: k, k: n, phase: "dgrad" },
+      { ...gemm, m: k, n, k: m, phase: "wgrad" },
+    ];
+    if (config.ac === "full" && !gemm.head) phases.push({ ...gemm, phase: "recompute" });
+    return phases.map((phase) => gemmCost(phase, config));
   }
 
   function attentionWork(mla, config) {
     const segment = config.seq / config.segments;
     // Count causal pairs, not the square of the flattened multi-row token count.
-    const forward = mla ? H * (192 + 128) * (segment + 1) : 6 * H * K * K;
+    // Edward Yang's K3 sheet adds the intra-chunk terms to the recurrent state work.
+    const forward = mla ? H * (192 + 128) * (segment + 1) : H * (6 * K * K + 10 * config.kdaChunk * K);
     const model = 3 * forward;
     const flashReplay = mla ? H * 192 * (segment + 1) : 0;
     const checkpoint = config.ac === "full" ? forward : 0;
@@ -63,13 +93,15 @@
 
   function calculate(input = {}) {
     const config = { ...defaults, ...input };
-    for (const key of ["pp", "cp", "ep", "seq", "rows", "mbs", "segments", "domain"])
+    for (const key of ["pp", "cp", "ep", "seq", "rows", "mbs", "segments", "domain", "kdaChunk"])
       if (!Number.isInteger(config[key]) || config[key] <= 0) throw new RangeError(`${key} must be a positive integer.`);
     if ((config.pp - 1) * Math.ceil(A.layers.length / config.pp) >= A.layers.length)
       throw new RangeError("The contiguous PP split cannot create empty stages.");
     for (const [key, values] of Object.entries({
       ac: ["full", "none"],
       policy: ["reference", "reshard", "retain"],
+      precision: ["bf16", "mxfp8-experts"],
+      routingMap: ["none", "hybridep"],
       copies: ["assignment", "rank"],
       ppLink: ["network", "nvlink"],
     }))
@@ -77,7 +109,7 @@
     if (!Number.isInteger(512 / (config.pp * config.cp))) throw new RangeError("PP x CP must divide the 512-GPU world.");
     const stageRanks = 512 / config.pp;
     if (experts % config.ep || stageRanks % config.ep) throw new RangeError("EP must divide 896 experts and the ranks of one PP stage.");
-    for (const key of ["gemm", "hbm", "nvl", "network"])
+    for (const key of ["gemm", "fp8Gemm", "hbm", "nvl", "network"])
       if (!Number.isFinite(config[key]) || config[key] <= 0) throw new RangeError(`${key} must be a positive finite rate.`);
     if (config.seq % config.segments || config.seq % config.cp) throw new RangeError("Context must divide evenly into segments and CP shards.");
     if (config.domain > stageRanks || stageRanks % config.domain)
@@ -95,7 +127,7 @@
           : { ag: config.mbs + 1, rs: 1 };
     const copies = remoteCopies(config);
     const epExchanges = full ? 6 : 4;
-    const metadataRounds = full ? 2 : 1;
+    const metadataRounds = config.routingMap === "hybridep" ? (full ? 2 : 1) : 0;
     const metadataInput = tokens * experts;
     const metadataCall = {
       nvl: (config.ep - 1) * metadataInput,
@@ -105,7 +137,10 @@
       const owned = A.partition(config.pp, rank);
       const allGemms = owned.layers.flatMap((layer) => A.gemmsForLayer(layer, tokens, config.ep));
       if (rank === config.pp - 1) allGemms.push({ name: "LM head", m: tokens, n: 163840, k: D, groups: 1, head: true });
-      const gemms = allGemms.map((gemm) => ({ ...gemmCost(gemm, config), passes: gemm.head ? 3 : full ? 4 : 3 }));
+      const gemms = allGemms.map((gemm) => {
+        const phases = gemmPhases(gemm, config);
+        return { ...gemmCost(gemm, config), phases, passes: phases.length };
+      });
       const learnedModelFlops = config.mbs * sum(gemms, (gemm) => 3 * gemm.flops * gemm.groups);
       const learnedIssuedFlops = config.mbs * sum(gemms, (gemm) => gemm.passes * gemm.flops * gemm.groups);
       const kda = owned.layers.filter((layer) => !layer.mla).length;
@@ -114,7 +149,7 @@
       const mlaWork = attentionWork(true, config);
       const coreModelFlops = config.mbs * tokens * (kda * kdaWork.model + mla * mlaWork.model);
       const coreIssuedFlops = config.mbs * tokens * (kda * kdaWork.issued + mla * mlaWork.issued);
-      const gemmSeconds = config.mbs * sum(gemms, (gemm) => gemm.passes * gemm.groups * gemm.seconds);
+      const gemmSeconds = config.mbs * sum(gemms, (gemm) => gemm.groups * sum(gemm.phases, (phase) => phase.seconds));
       const computeSeconds = gemmSeconds + coreIssuedFlops / (config.gemm * 1e12);
       const moeLayers = owned.layers.filter((layer) => layer.index !== 0).length;
       const denseLocal = Math.min(config.domain, stageRanks);
@@ -134,7 +169,7 @@
         { key: "payload", label: "Expert token payload", nvl: payload * copies.ranks, network: payload * copies.domains },
         {
           key: "metadata",
-          label: "HybridEP routing map",
+          label: config.routingMap === "hybridep" ? "HybridEP routing map (optional)" : "Global routing map (not selected)",
           nvl: calls * metadataRounds * metadataCall.nvl,
           network: calls * metadataRounds * metadataCall.network,
         },
@@ -200,6 +235,10 @@
     const causalModelFlops = stageRanks * sum(stages, (stage) => stage.learnedModelFlops + stage.coreModelFlops);
     const issuedFlops = stageRanks * sum(stages, (stage) => stage.learnedIssuedFlops + stage.coreIssuedFlops);
     const conventionPerToken = 6 * A.activeParams + 69 * 18 * H * K * K + 24 * 6 * H * (192 + 128) * config.seq;
+    const tokensPerGPUUpdate = globalTokens / 512;
+    // Neither measured throughput nor backend-specific communication sets the compute ceiling.
+    const computeTokensPerSecondPerGPU = tokensPerGPUUpdate / computeSeconds;
+    const resourceTokensPerSecondPerGPU = tokensPerGPUUpdate / sketchSeconds;
     const forwardGemmPoints = [...A.gemmsForLayer(A.layers[1], tokens, config.ep), ...A.gemmsForLayer(A.layers[3], tokens, config.ep)]
       .filter((gemm) =>
         ["KDA Q projection", "KDA decay expansion", "Latent compression", "Router", "MLA Q expansion", "Routed gate/up", "Routed down"].includes(
@@ -215,6 +254,10 @@
       expertFsdp,
       tokens,
       globalTokens,
+      tokensPerGPUUpdate,
+      computeTokensPerSecondPerGPU,
+      computeModelTFLOPsPerGPU: (computeTokensPerSecondPerGPU * conventionPerToken) / 1e12,
+      resourceTokensPerSecondPerGPU,
       globalRows: dp * config.mbs * config.rows,
       rounds,
       copies,
@@ -242,7 +285,7 @@
     };
   }
 
-  const api = { defaults, calculate, gemmCost, attentionWork, collectiveBytes, remoteCopies };
+  const api = { defaults, calculate, gemmCost, gemmPhases, attentionWork, collectiveBytes, remoteCopies };
   if (typeof module === "object" && module.exports) module.exports = api;
   else root.KimiK3Roofline = api;
 })(typeof window === "undefined" ? globalThis : window);

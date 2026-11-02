@@ -68,8 +68,8 @@ test("the BF16 roofline uses FLOPs, operand bytes and dense hardware rates", () 
   assert.equal(gemm.flops, 2 * 4096 * 12288 * 7168);
   assert.equal(gemm.bytes, 2 * (4096 * 7168 + 7168 * 12288 + 4096 * 12288));
   close(gemm.intensity, 2150.4);
-  close(gemm.seconds, Math.max(gemm.flops / 2500e12, gemm.bytes / 8e12));
-  assert.equal(x.config.gemm / x.config.hbm, 312.5);
+  close(gemm.seconds, Math.max(gemm.flops / 1800e12, gemm.bytes / 8e12));
+  assert.equal(x.config.gemm / x.config.hbm, 225);
 });
 
 test("two 2K rows preserve tokenwise work but change causal MLA pairs", () => {
@@ -102,8 +102,8 @@ test("the fixed conventional FLOP metric reproduces the reported 4K TFLOP/s", ()
 });
 
 test("full checkpoint adds decoder forwards but not an extra output-head GEMM", () => {
-  const full = R.calculate();
-  const none = R.calculate({ ac: "none" });
+  const full = R.calculate({ routingMap: "hybridep" });
+  const none = R.calculate({ ac: "none", routingMap: "hybridep" });
   const extraMatrices = full.stageRanks * sum(full.stages, (stage, rank) => stage.learnedIssuedFlops - none.stages[rank].learnedIssuedFlops);
   close(extraMatrices, 2 * (A.linearParams - A.embedding) * full.globalTokens);
   assert.equal(full.epExchanges, 6);
@@ -128,9 +128,9 @@ test("64K CP16 keeps 4K local tokens, 16.78M global tokens and FSDP64", () => {
 });
 
 test("EP and dense FSDP inside one assumed NVLink domain have no scale-out collective budget", () => {
-  const x = R.calculate();
+  const x = R.calculate({ routingMap: "hybridep" });
   for (const stage of x.stages) for (const item of stage.traffic) if (item.key !== "pipeline") assert.equal(item.network, 0);
-  const split = R.calculate({ domain: 8 });
+  const split = R.calculate({ domain: 8, routingMap: "hybridep" });
   for (const key of ["payload", "metadata", "fsdp"]) assert.ok(split.stages[3].traffic.find((item) => item.key === key).network > 0);
   assert.equal(x.copies.ranks, 15.75);
   assert.equal(x.copies.domains, 0);
@@ -149,7 +149,7 @@ test("optional rank deduplication is bounded by the assignment budget", () => {
 });
 
 test("the routing-map collective uses one byte per Boolean, not top-k integers", () => {
-  const x = R.calculate();
+  const x = R.calculate({ routingMap: "hybridep" });
   assert.equal(x.metadataInput, 3670016);
   assert.equal((x.metadataInput * x.config.ep) / 2 ** 20, 224);
   assert.equal(x.metadataCall.nvl / 2 ** 20, 220.5);
@@ -193,6 +193,105 @@ test("Muon NS estimate counts three logical matrices, not one fused storage tens
   assert.equal(stage.nsFlops, 504 * stage.nsPerMatrix);
 });
 
+test("practical SOL defaults reproduce Edward's current Blackwell K3 rate inputs", () => {
+  assert.equal(R.defaults.gemm, 1800);
+  assert.equal(R.defaults.fp8Gemm, 3600);
+  assert.equal(R.defaults.hbm, 8);
+  assert.equal(R.defaults.nvl, 900);
+  assert.equal(R.defaults.network, 100);
+});
+
+test("KDA core includes the reference's recurrent and intra-chunk contractions", () => {
+  const x = R.calculate();
+  const core = R.attentionWork(false, x.config);
+  assert.equal(x.config.kdaChunk, 64);
+  assert.equal(core.forward, 17301504);
+  assert.equal(core.model, 3 * 17301504);
+  assert.equal(core.flashReplay, 0);
+  assert.equal(core.checkpoint, 17301504);
+  assert.equal(69 * core.model, 3581411328);
+  const largerChunk = R.attentionWork(false, { ...x.config, kdaChunk: 128 });
+  assert.equal(largerChunk.forward - core.forward, 96 * 10 * 64 * 128);
+  // The published training-log convention remains unchanged by a runtime correction.
+  assert.equal(R.calculate({ kdaChunk: 128 }).conventionPerToken, x.conventionPerToken);
+});
+
+test("the headline is a compute-only hardware/configuration ceiling, not measured throughput", () => {
+  const x = R.calculate();
+  assert.equal(x.tokensPerGPUUpdate, 32768);
+  close(x.computeTokensPerSecondPerGPU, x.globalTokens / (512 * x.computeSeconds));
+  close(x.computeModelTFLOPsPerGPU, (x.computeTokensPerSecondPerGPU * x.conventionPerToken) / 1e12);
+  close(x.resourceTokensPerSecondPerGPU, x.globalTokens / (512 * x.sketchSeconds));
+  assert.ok(x.computeTokensPerSecondPerGPU > x.resourceTokensPerSecondPerGPU);
+  const source = readFileSync(join(__dirname, "..", "kimi-k3-roofline-model.js"), "utf8");
+  assert.doesNotMatch(source, /throughput:\s*(?:370|372|297)|FakePG/);
+});
+
+test("backend metadata, topology and communication policy cannot change the compute headline", () => {
+  const x = R.calculate();
+  assert.equal(x.metadataRounds, 0);
+  assert.ok(x.stages.every((stage) => stage.traffic.find((item) => item.key === "metadata").nvl === 0));
+  for (const input of [
+    { routingMap: "hybridep" },
+    { routingMap: "hybridep", domain: 8, network: 10 },
+    { copies: "rank", policy: "retain", ppLink: "nvlink", nvl: 25 },
+    { fp8Gemm: 1000 },
+  ]) {
+    const other = R.calculate(input);
+    assert.equal(other.computeSeconds, x.computeSeconds);
+    assert.equal(other.computeTokensPerSecondPerGPU, x.computeTokensPerSecondPerGPU);
+  }
+  assert.ok(R.calculate({ routingMap: "hybridep", domain: 8, network: 10 }).resourceTokensPerSecondPerGPU < x.resourceTokensPerSecondPerGPU);
+  assert.ok(R.calculate({ gemm: 1200 }).computeTokensPerSecondPerGPU < x.computeTokensPerSecondPerGPU);
+});
+
+test("MXFP8 changes only routed GEMM pricing, never the model's FLOP or token counts", () => {
+  const bf16 = R.calculate();
+  const mx = R.calculate({ precision: "mxfp8-experts" });
+  assert.equal(mx.globalTokens, bf16.globalTokens);
+  assert.equal(mx.causalModelFlops, bf16.causalModelFlops);
+  assert.equal(mx.issuedFlops, bf16.issuedFlops);
+  assert.ok(mx.computeTokensPerSecondPerGPU > bf16.computeTokensPerSecondPerGPU);
+  for (const gemm of mx.stages.flatMap((stage) => stage.gemms)) {
+    assert.equal(gemm.precision, gemm.routed ? "MXFP8" : "BF16");
+    assert.equal(gemm.rate, gemm.routed ? 3600 : 1800);
+  }
+  const routed = mx.forwardGemmPoints.find((gemm) => gemm.name === "Routed gate/up");
+  close(routed.bytes, (1 + 1 / 32) * (routed.m * routed.k + routed.k * routed.n) + 2 * routed.m * routed.n);
+  close(routed.seconds, Math.max(routed.flops / 3600e12, routed.bytes / 8e12));
+});
+
+test("forward, DGRAD and WGRAD have their own shapes and output-byte budgets", () => {
+  const x = R.calculate({ precision: "mxfp8-experts" });
+  const routed = x.stages[3].gemms.find((gemm) => gemm.name === "Routed gate/up");
+  assert.deepEqual(
+    routed.phases.map((phase) => phase.phase),
+    ["forward", "dgrad", "wgrad", "recompute"]
+  );
+  const [forward, dgrad, wgrad, replay] = routed.phases;
+  assert.deepEqual([dgrad.m, dgrad.n, dgrad.k], [forward.m, forward.k, forward.n]);
+  assert.deepEqual([wgrad.m, wgrad.n, wgrad.k], [forward.k, forward.n, forward.m]);
+  assert.equal(dgrad.flops, forward.flops);
+  assert.equal(wgrad.flops, forward.flops);
+  close(wgrad.bytes, (1 + 1 / 32) * (wgrad.m * wgrad.k + wgrad.k * wgrad.n) + 4 * wgrad.m * wgrad.n);
+  assert.equal(replay.seconds, forward.seconds);
+  const head = x.stages.at(-1).gemms.find((gemm) => gemm.head);
+  assert.deepEqual(
+    head.phases.map((phase) => phase.phase),
+    ["forward", "dgrad", "wgrad"]
+  );
+  assert.equal(head.precision, "BF16");
+});
+
+test("every calculator input exists and the static headline agrees with its analytic default", () => {
+  const html = readFileSync(join(__dirname, "..", "kimi-k3-roofline.html"), "utf8");
+  for (const key of Object.keys(R.defaults)) assert.ok(html.includes(`id="roof-${key}"`), key);
+  const headline = html.match(/<strong id="headline-compute">([^<]+)<\/strong>/)[1];
+  assert.equal(headline, `${R.calculate().computeTokensPerSecondPerGPU.toLocaleString("en-US", { maximumFractionDigits: 0 })} tok/s/GPU`);
+  assert.match(html, /Historical measurements: comparison only, not the roofline/);
+  assert.match(html, /https:\/\/deepseek-v3\.ezyang\.com\/studies\/kimi-k3\.html/);
+});
+
 test("invalid user-facing accounting inputs fail explicitly", () => {
   for (const config of [
     { pp: 3 },
@@ -207,6 +306,10 @@ test("invalid user-facing accounting inputs fail explicitly", () => {
     { seq: 4097, cp: 4 },
     { segments: 3 },
     { gemm: 0 },
+    { fp8Gemm: 0 },
+    { precision: "fp4" },
+    { routingMap: "unknown" },
+    { kdaChunk: 0 },
     { hbm: Infinity },
     { rows: -1 },
     { policy: "unknown" },
