@@ -2,10 +2,117 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const { readFileSync } = require("node:fs");
 const { join } = require("node:path");
+const { createHash } = require("node:crypto");
 const A = require("../kimi-k3-accounting.js");
 const R = require("../kimi-k3-roofline-model.js");
+const M = require("../kimi-k3-memory-model.js");
+const legacyVPP1 = require("./fixtures/kimi-k3-roofline-vp1.json");
 const sum = (items, get) => items.reduce((total, item, index) => total + get(item, index), 0);
 const close = (actual, expected) => assert.ok(Math.abs(actual - expected) <= 1e-12 * Math.max(1, Math.abs(expected)), `${actual} != ${expected}`);
+
+test("VPP1 preserves the complete pre-VPP calculation across frozen representative recipes", () => {
+  assert.equal(legacyVPP1.sourceCommit, "5903634fb9e3376dae7b4c6289430e2b1fcf80f2");
+  for (const { input, sha256 } of legacyVPP1.cases) {
+    for (const config of [input, { ...input, vp: 1 }]) {
+      const result = JSON.parse(JSON.stringify(R.calculate(config)));
+      // Remove only the added VPP metadata, not any existing calculation or parameter/traffic detail.
+      delete result.config.vp;
+      delete result.pipeline;
+      delete result.chunks;
+      delete result.ppEdges;
+      for (const stage of [...result.stages, result.computeStage, result.nvlStage, result.networkStage]) delete stage.chunks;
+      assert.equal(createHash("sha256").update(JSON.stringify(result)).digest("hex"), sha256, JSON.stringify(config));
+    }
+  }
+});
+
+test("estimated loop chunks agree with the existing memory model's placement and parameter ownership", () => {
+  for (const pp of [1, 2, 4, 8, 16]) {
+    for (const vp of [1, 2, 4]) {
+      if (pp === 16 && vp === 4) continue;
+      const config = M.normalize({ pp, vp, stage: 0, ep: Math.min(64, 512 / pp), sched: vp > 1 ? "interleaved" : "1f1b" });
+      const expected = M.partitionChunks(config);
+      const chunks = R.virtualChunks(config);
+      assert.equal(chunks.length, pp * vp);
+      assert.deepEqual(
+        chunks.flatMap((chunk) => chunk.owned.layers.map((layer) => layer.index)),
+        Array.from({ length: 93 }, (_, i) => i)
+      );
+      for (let index = 0; index < chunks.length; index++) {
+        const chunk = chunks[index];
+        assert.equal(chunk.index, expected[index].index);
+        assert.equal(chunk.rank, index % pp);
+        assert.equal(chunk.local, Math.floor(index / pp));
+        assert.deepEqual(chunk.owned.layers, expected[index].layers);
+        for (const key of ["dense", "routed", "adam", "front", "back"]) assert.equal(chunk.owned[key], expected[index][key]);
+      }
+    }
+  }
+});
+
+test("VPP estimates change ownership and nominal bubbles without dividing work, batch, FSDP degree or resident state", () => {
+  for (const precision of ["bf16", "mxfp8-experts"]) {
+    const base = R.calculate({ pp: 4, mbs: 32, precision });
+    for (const vp of [2, 4]) {
+      const result = R.calculate({ pp: 4, mbs: 32, precision, vp });
+      assert.equal(result.pipeline.estimated, true);
+      assert.equal(result.pipeline.schedule, "interleaved-1f1b");
+      assert.equal(result.pipeline.placement, "automatic-loop");
+      assert.equal(result.globalTokens, base.globalTokens);
+      assert.equal(result.tokens, base.tokens);
+      assert.equal(result.stageRanks, base.stageRanks);
+      assert.equal(result.expertFsdp, base.expertFsdp);
+      assert.equal(result.conventionPerToken, base.conventionPerToken);
+      close(result.causalModelFlops, base.causalModelFlops);
+      close(result.issuedFlops, base.issuedFlops);
+      close(
+        sum(result.stages, (stage) => stage.computeSeconds),
+        sum(base.stages, (stage) => stage.computeSeconds)
+      );
+      close(
+        sum(result.stages, (stage) => stage.stateBytes),
+        sum(base.stages, (stage) => stage.stateBytes)
+      );
+      assert.equal(
+        sum(result.stages, (stage) => stage.owned.dense + stage.owned.routed),
+        A.totalParams
+      );
+      assert.equal(result.bubbleRatio, (4 - 1) / (32 * vp));
+      assert.equal(result.bubbleSeconds, result.computeSeconds * result.bubbleRatio);
+      for (const stage of result.stages) assert.equal(stage.chunks.length, vp);
+      assert.equal(result.resourceTokensPerSecondPerGPU, result.tokensPerGPUUpdate / (result.resourceSeconds + result.bubbleSeconds));
+    }
+  }
+});
+
+test("VPP PP traffic charges all logical edges, wraparound and both directions without residual-cache reuse", () => {
+  const result = R.calculate({ pp: 4, mbs: 32, vp: 2 });
+  assert.equal(result.ppEdges.length, 7);
+  assert.equal(result.pipeline.residualCacheReuse, false);
+  assert.deepEqual(
+    result.ppEdges.map((edge) => edge.blocks),
+    [1, 2, 3, 4, 5, 6, 7]
+  );
+  const wrap = result.ppEdges.find((edge) => edge.sourceRank === 3 && edge.destinationRank === 0);
+  assert.equal(wrap.sourceChunk, 3);
+  assert.equal(wrap.destinationChunk, 4);
+  assert.equal(wrap.forwardBytes, 4096 * 7168 * 2 * 5);
+  assert.equal(result.stages[0].ppBytes, 32 * 4096 * 7168 * 2 * (2 + 5 + 6));
+  assert.equal(
+    sum(result.stages, (stage) => stage.ppBytes),
+    2 * sum(result.ppEdges, (edge) => edge.bytesPerDirection)
+  );
+  const local = R.calculate({ pp: 1, vp: 4 });
+  assert.ok(local.ppEdges.every((edge) => !edge.remote));
+  assert.equal(local.stages[0].ppBytes, 0);
+  assert.equal(local.bubbleRatio, 0);
+  close(local.computeSeconds, R.calculate({ pp: 1 }).computeSeconds);
+});
+
+test("estimated VPP rejects splits with empty decoder chunks", () => {
+  assert.throws(() => R.calculate({ pp: 16, vp: 4, ep: 32, domain: 32 }), /empty decoder chunks/);
+  assert.throws(() => R.virtualChunks({ pp: 32, vp: 1 }), /empty stages/);
+});
 
 test("shared accounting matches the architecture and FP32 memory studies", () => {
   assert.equal(A.totalParams, 2779931738208);
@@ -347,6 +454,9 @@ test("every calculator input exists and recipe-specific results agree with the d
   assert.match(html, /value="gb200" selected/);
   assert.match(html, /value="gb300"/);
   assert.match(html, /id="roof-hardware-note"/);
+  assert.match(html, /id="roof-vp"/);
+  assert.match(html, /VPP1 keeps the existing TP1, ordinary-1F1B model unchanged/);
+  assert.match(html, /VPP &gt; 1 is an estimate, not a schedule simulation/);
   assert.match(html, /Identical rate inputs produce identical modeled times/);
   assert.match(html, /Roofline for the configured recipe/);
   assert.match(html, /Historical measurements: comparison only, not the roofline/);
@@ -386,6 +496,11 @@ test("invalid user-facing accounting inputs fail explicitly", () => {
     { hardware: "unknown" },
     { hardware: "constructor" },
     { hardware: null },
+    { vp: 0 },
+    { vp: -1 },
+    { vp: 1.5 },
+    { vp: Infinity },
+    { vp: 128 },
     { world: 0 },
     { world: -1 },
     { world: 255 },

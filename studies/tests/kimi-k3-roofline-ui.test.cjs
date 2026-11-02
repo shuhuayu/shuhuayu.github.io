@@ -72,10 +72,16 @@ function controller() {
   const html = readFileSync(join(__dirname, "..", "kimi-k3-roofline.html"), "utf8");
   const elements = new Map([...html.matchAll(/<([\w-]+)[^>]*\bid="([^"]+)"[^>]*>/g)].map((match) => [match[2], new Element(match[1])]));
   for (const match of html.matchAll(/<select\s+id="([^"]+)"[^>]*>([\s\S]*?)<\/select>/g)) {
-    elements.get(match[1]).options = [...match[2].matchAll(/<option([^>]*)>([^<]+)<\/option>/g)].map((option) => ({
+    const options = [...match[2].matchAll(/<option([^>]*)>([^<]+)<\/option>/g)].map((option) => ({
       value: option[1].match(/value="([^"]+)"/)?.[1] ?? option[2].trim(),
       disabled: false,
     }));
+    // HTML collections are iterable but do not provide Array.find/filter.
+    elements.get(match[1]).options = {
+      length: options.length,
+      item: (index) => options[index] ?? null,
+      [Symbol.iterator]: () => options[Symbol.iterator](),
+    };
   }
   const presets = [...html.matchAll(/data-preset="([^"]+)"/g)].map((match) => {
     const button = new Element("button");
@@ -191,15 +197,54 @@ test("scenario buttons preserve hardware and custom rates while reset restores 5
   assert.equal(Number(ui.get("roof-recipe-throughput").dataset.throughput), R.calculate().resourceTokensPerSecondPerGPU);
 });
 
-test("JSON and CSV exports retain the configured world and recipe-specific results (DOM test double)", () => {
+test("estimated VPP updates chunk placement, wraparound packets and results, and returning to VPP1 restores the original result (DOM test double)", () => {
   const ui = controller();
   ui.change({ hardware: "gb300" });
-  ui.change({ world: 256, pp: 4, mbs: 32, precision: "mxfp8-experts", network: 50 });
-  const expected = R.calculate({ hardware: "gb300", world: 256, pp: 4, mbs: 32, precision: "mxfp8-experts", network: 50 });
+  ui.change({ world: 256, pp: 4, mbs: 32 });
+  const before = Number(ui.get("roof-recipe-throughput").dataset.throughput);
+  ui.preset("vpp2");
+  const expected = R.calculate({ hardware: "gb300", world: 256, pp: 4, mbs: 32, vp: 2 });
+  assert.equal(Number(ui.get("roof-vp").value), 2);
+  assert.match(ui.get("roof-pipeline-mode").textContent, /Estimated VPP2.*interleaved 1F1B/);
+  assert.equal(String(ui.get("roof-pipeline-mode").dataset.estimated), "true");
+  assert.match(ui.get("roof-result-caption").textContent, /estimated VPP2/);
+  assert.match(ui.get("roof-warning").textContent, /Residual-cache reuse, communication startup and schedule-specific waits are not modeled/);
+  assert.match(ui.get("roof-stage-buttons").children[0].children[0].textContent, /C1: L1-11 \/ C5: L48-59/);
+  assert.ok(ui.get("pp-packets").children.some((row) => row.children[0]?.textContent === "C4/PP3 -> C5/PP0"));
+  assert.equal(Number(ui.get("roof-recipe-throughput").dataset.throughput), expected.resourceTokensPerSecondPerGPU);
+  assert.match(ui.get("bubble-caption").textContent, /\(PP - 1\) \/ \(M \* VPP\)/);
+  ui.change({ vp: 1 });
+  assert.equal(String(ui.get("roof-pipeline-mode").dataset.estimated), "false");
+  assert.equal(Number(ui.get("roof-recipe-throughput").dataset.throughput), before);
+  assert.doesNotMatch(ui.get("roof-result-caption").textContent, /estimated/);
+});
+
+test("VPP selector disables empty-chunk splits and normalizes only unsupported VPP choices (DOM test double)", () => {
+  const ui = controller();
+  ui.change({ vp: 4 });
+  assert.equal(Number(ui.get("roof-vp").value), 4);
+  ui.change({ pp: 16 });
+  assert.equal(Number(ui.get("roof-vp").value), 2);
+  assert.equal([...ui.get("roof-vp").options].find((option) => option.value === "4").disabled, true);
+  assert.match(ui.get("roof-warning").textContent, /VPP 4 -> 2 to keep decoder chunks nonempty/);
+  const expected = R.calculate({ pp: 16, vp: 2, ep: 32, domain: 32 });
+  assert.equal(Number(ui.get("roof-recipe-throughput").dataset.throughput), expected.resourceTokensPerSecondPerGPU);
+});
+
+test("JSON and CSV exports retain the configured world, estimated VPP and recipe-specific results (DOM test double)", () => {
+  const ui = controller();
+  ui.change({ hardware: "gb300" });
+  ui.change({ world: 256, pp: 4, mbs: 32, precision: "mxfp8-experts", network: 50, vp: 2 });
+  const expected = R.calculate({ hardware: "gb300", world: 256, pp: 4, mbs: 32, precision: "mxfp8-experts", network: 50, vp: 2 });
   ui.get("export-json").click();
   const json = JSON.parse(ui.downloads[0].content);
   assert.equal(json.config.world, 256);
   assert.equal(json.config.hardware, "gb300");
+  assert.equal(json.config.vp, 2);
+  assert.equal(json.pipeline.estimated, true);
+  assert.equal(json.pipelineChunks.length, 8);
+  assert.equal(json.pipelineEdges.length, 7);
+  assert.ok(json.stages.every((stage) => stage.logicalChunks.length === 2));
   assert.equal(json.hardware.computeBasis, "gb300-practical-target");
   assert.deepEqual(json.hardware.overriddenRates, ["network"]);
   assert.deepEqual(json.hardware.referenceRates, R.hardwareProfiles.gb300.rates);
@@ -218,5 +263,9 @@ test("JSON and CSV exports retain the configured world and recipe-specific resul
     assert.equal(row[header.indexOf("compute_rate_basis")], "gb300-practical-target");
     assert.equal(row[header.indexOf("overridden_rates")], "network");
     assert.equal(row[header.indexOf("network_gb_s")], "50");
+    assert.equal(row[header.indexOf("virtual_chunks_per_rank")], "2");
+    assert.equal(row[header.indexOf("pipeline_schedule")], "interleaved-1f1b");
+    assert.equal(row[header.indexOf("vpp_estimated")], "true");
+    assert.equal(row[header.indexOf("logical_chunk_indices")], `${row[0]};${Number(row[0]) + 4}`);
   }
 });
