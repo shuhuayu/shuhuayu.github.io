@@ -2,7 +2,24 @@
   const A = typeof module === "object" && module.exports ? require("./kimi-k3-accounting.js") : root.KimiK3Model;
   const { D, H, K, Z, F, experts, topK } = A;
   const sum = (items, get) => items.reduce((total, item) => total + get(item), 0);
+  const referenceRates = Object.freeze({ gemm: 1800, fp8Gemm: 3600, hbm: 8, nvl: 900, network: 100 });
+  const rateKeys = Object.keys(referenceRates);
+  const hardwareProfiles = {
+    gb200: {
+      label: "GB200",
+      computeBasis: "gb300-reference-proxy",
+      note: "The compute preset reuses Edward's GB300 targets as an uncalibrated GB200 proxy. Replace them with practical GB200 rates before comparing the two GPUs.",
+      rates: referenceRates,
+    },
+    gb300: {
+      label: "GB300",
+      computeBasis: "gb300-practical-target",
+      note: "Edward's practical GB300 targets: BF16 is empirically informed; MXFP8 assumes twice BF16, not a directly measured kernel rate.",
+      rates: referenceRates,
+    },
+  };
   const defaults = {
+    hardware: "gb200",
     world: 512,
     pp: 8,
     cp: 1,
@@ -19,12 +36,7 @@
     domain: 64,
     copies: "assignment",
     ppLink: "network",
-    // Practical SOL inputs from Edward Yang's current Blackwell/K3 analysis.
-    gemm: 1800,
-    fp8Gemm: 3600,
-    hbm: 8,
-    nvl: 900,
-    network: 100,
+    ...hardwareProfiles.gb200.rates,
   };
 
   function gemmCost(gemm, config) {
@@ -93,7 +105,11 @@
   }
 
   function calculate(input = {}) {
-    const config = { ...defaults, ...input };
+    const hardware = input.hardware === undefined ? defaults.hardware : input.hardware;
+    if (!Object.keys(hardwareProfiles).includes(hardware)) throw new RangeError("Unknown GPU hardware profile.");
+    const profile = hardwareProfiles[hardware];
+    // Explicit rates override the selected profile; the device name never applies a hidden speed multiplier.
+    const config = { ...defaults, ...profile.rates, ...input, hardware };
     for (const key of ["world", "pp", "cp", "ep", "seq", "rows", "mbs", "segments", "domain", "kdaChunk"])
       if (!Number.isInteger(config[key]) || config[key] <= 0) throw new RangeError(`${key} must be a positive integer.`);
     if ((config.pp - 1) * Math.ceil(A.layers.length / config.pp) >= A.layers.length)
@@ -250,6 +266,16 @@
       .map((gemm) => gemmCost(gemm, config));
     return {
       config,
+      hardware: {
+        profile: config.hardware,
+        label: profile.label,
+        computeBasis: profile.computeBasis,
+        note: profile.note,
+        source: "https://deepseek-v3.ezyang.com/studies/kimi-k3.html",
+        referenceRates: profile.rates,
+        overriddenRates: rateKeys.filter((key) => config[key] !== profile.rates[key]),
+        networkBasis: "Editable per-GPU system budget; 100 GB/s is the GB300 reference assumption, not a measured allocation rate.",
+      },
       dp,
       stageRanks,
       expertFsdp,
@@ -287,7 +313,7 @@
     };
   }
 
-  const api = { defaults, calculate, gemmCost, gemmPhases, attentionWork, collectiveBytes, remoteCopies };
+  const api = { defaults, hardwareProfiles, rateKeys, calculate, gemmCost, gemmPhases, attentionWork, collectiveBytes, remoteCopies };
   if (typeof module === "object" && module.exports) module.exports = api;
   else root.KimiK3Roofline = api;
 })(typeof window === "undefined" ? globalThis : window);

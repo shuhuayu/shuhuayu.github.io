@@ -331,6 +331,19 @@
     }
     current = R.calculate(readConfig());
     const c = current.config;
+    const hardware = current.hardware;
+    text(
+      "roof-hardware-note",
+      `${hardware.label}: ${hardware.note} ${
+        hardware.overriddenRates.length
+          ? `Custom input overrides: ${hardware.overriddenRates.join(", ")}; no calibration measurements attached. `
+          : ""
+      }The NIC budget is a separate system assumption. Hardware selection does not establish memory fit.`
+    );
+    get("roof-hardware-note").dataset.hardware = c.hardware;
+    get("roof-hardware-note").dataset.computeBasis = hardware.computeBasis;
+    text("hardware-bf16-ridge", `${number(c.gemm / c.hbm)} FLOP/B`);
+    text("roof-result-caption", `Roofline for the configured recipe: ${c.world} ${hardware.label} GPUs`);
     const notices = changes.map((change) => `Adjusted to fit the ${c.world}-GPU mesh: ${change}.`);
     if (c.cp > 1) notices.push("CP attention communication is not priced. The long-context time sketch is incomplete.");
     if (c.policy === "retain")
@@ -343,7 +356,7 @@
     warning.textContent = notices.join(" ");
     text(
       "roof-shape",
-      `${c.world} = PP${c.pp} x CP${c.cp} x DP${current.dp}; dense FSDP${current.stageRanks}; EP${c.ep} x expert FSDP${
+      `${hardware.label}: ${c.world} = PP${c.pp} x CP${c.cp} x DP${current.dp}; dense FSDP${current.stageRanks}; EP${c.ep} x expert FSDP${
         current.expertFsdp
       }. T_local = ${c.rows} x ${number(c.seq, 0)} / ${c.cp} = ${number(current.tokens, 0)}. FP32 state / ${
         c.precision === "mxfp8-experts" ? "MXFP8 routed GEMMs, BF16 elsewhere" : "BF16 GEMMs"
@@ -394,14 +407,21 @@
   document.querySelectorAll("[data-preset]").forEach((button) =>
     button.addEventListener("click", () => {
       selectedStage = 3;
-      apply({ ...R.defaults, ...presets[button.dataset.preset] });
+      apply(button.dataset.preset === "baseline" ? R.defaults : { ...readConfig(), ...presets[button.dataset.preset] });
     })
   );
   get("show-critical").addEventListener("click", () => {
     selectedStage = current.computeStage.rank;
     renderTraffic(current);
   });
-  for (const key of keys) controls[key].addEventListener("change", render);
+  for (const key of keys)
+    controls[key].addEventListener("change", () => {
+      if (key === "hardware") {
+        const profile = R.hardwareProfiles[controls.hardware.value];
+        for (const rateKey of R.rateKeys) controls[rateKey].value = profile.rates[rateKey];
+      }
+      render();
+    });
 
   const references = [
     { label: "2K / forced-balanced", seq: 2048, rows: 2, throughput: 372 },
@@ -446,6 +466,7 @@
             current.config.precision === "mxfp8-experts" ? "MXFP8 routed experts, BF16 other GEMMs" : "BF16 model GEMMs"
           }; BF16 Muon Newton-Schulz working copy`,
           config: current.config,
+          hardware: current.hardware,
           structural: { parameters: A.totalParams, activeParameterConvention: A.activeParams, learnedActiveMatrices: A.linearParams },
           derived: {
             dp: current.dp,
@@ -487,6 +508,9 @@
   get("export-csv").addEventListener("click", () => {
     const header = [
       "pp_rank",
+      "gpu_hardware",
+      "compute_rate_basis",
+      "overridden_rates",
       "gpu_count",
       "pp_degree",
       "cp_degree",
@@ -520,6 +544,9 @@
     const c = current.config;
     const rows = current.stages.map((stage) => [
       stage.rank,
+      c.hardware,
+      current.hardware.computeBasis,
+      current.hardware.overriddenRates.join(";"),
       c.world,
       c.pp,
       c.cp,

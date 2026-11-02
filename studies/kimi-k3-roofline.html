@@ -6,15 +6,15 @@
     <meta name="robots" content="noindex, follow" />
     <meta
       name="description"
-      content="Configure a Kimi K3 training recipe and calculate its roofline from practical hardware rates, compute, communication and pipeline costs. Default: 512 GB200 GPUs."
+      content="Configure a Kimi K3 training recipe on GB200 or GB300 and calculate its roofline from explicit hardware rates, compute, communication and pipeline costs. Default: 512 GB200 GPUs."
     />
     <title>Kimi K3: recipe-to-roofline calculator</title>
     <link rel="stylesheet" href="./kimi-k3-memory.css" />
     <link rel="stylesheet" href="./kimi-k3-series.css" />
     <link rel="stylesheet" href="./kimi-k3-roofline.css" />
     <script src="./kimi-k3-accounting.js?v=memory-2" defer></script>
-    <script src="./kimi-k3-roofline-model.js?v=roofline-4" defer></script>
-    <script src="./kimi-k3-roofline.js?v=roofline-4" defer></script>
+    <script src="./kimi-k3-roofline-model.js?v=roofline-5" defer></script>
+    <script src="./kimi-k3-roofline.js?v=roofline-5" defer></script>
   </head>
   <body>
     <main class="page">
@@ -36,9 +36,9 @@
           training throughput is a separate comparison, never an input to the analytic model.
         </p>
         <p class="scope">
-          <a href="#lab">Configure your recipe in the calculator</a>, starting from the default GB200 setup. Its results include the modeled
-          compute/HBM, communication and pipeline constraints. CUDA graphs do not change analytic FLOP and byte counts; CPU/launch overhead and memory
-          feasibility need separate validation.
+          <a href="#lab">Configure your recipe in the calculator</a>, choosing GB200 or GB300 and starting from the default GB200 setup. Its results
+          include the modeled compute/HBM, communication and pipeline constraints. CUDA graphs do not change analytic FLOP and byte counts; CPU/launch
+          overhead and memory feasibility need separate validation.
         </p>
         <nav class="jump-links" aria-label="Sections">
           <a href="#lab">Recipe calculator</a><a href="#hardware">Hardware inputs</a><a href="#flops">Counting FLOPs</a
@@ -59,22 +59,25 @@
             <thead>
               <tr>
                 <th>Resource</th>
-                <th>Default SOL input</th>
+                <th>GB200 reference profile</th>
+                <th>GB300 reference profile</th>
                 <th>How to read it</th>
               </tr>
             </thead>
             <tbody>
               <tr>
                 <td>BF16 Tensor Cores</td>
-                <td>1,800 TFLOP/s / GPU</td>
+                <td>1,800 TFLOP/s / GPU, uncalibrated proxy</td>
+                <td>1,800 TFLOP/s / GPU, practical target</td>
                 <td>
-                  Edward's sustained random-data target for Blackwell at the GB300 power envelope, informed by public B300 evidence. This is the
-                  compute denominator, not NVIDIA's claimed peak and not a measured rate from our GB200 training job.
+                  Edward's sustained random-data target at the GB300 power envelope, informed by public B300 evidence. GB200 temporarily reuses it as
+                  an explicit proxy: no practical GB200 compute calibration is supplied. Neither entry uses NVIDIA's advertised compute peak.
                 </td>
               </tr>
               <tr>
                 <td>MXFP8 Tensor Cores</td>
-                <td>3,600 TFLOP/s / GPU</td>
+                <td>3,600 TFLOP/s / GPU, uncalibrated proxy</td>
+                <td>3,600 TFLOP/s / GPU, assumed target</td>
                 <td>
                   Edward's MXFP8 target, modeled as twice the practical BF16 rate. It is an assumption, not a directly measured MXFP8 kernel rate.
                   Only routed expert GEMMs use it here; dense, shared, router, LM head, attention-core and Muon contractions remain BF16.
@@ -83,10 +86,15 @@
               <tr>
                 <td>HBM</td>
                 <td>8 TB/s / GPU</td>
-                <td>The Blackwell HBM budget used for the operand roofline. Bandwidth, not the 184.31-GiB capacity reported by the GB200 runtime.</td>
+                <td>8 TB/s / GPU</td>
+                <td>
+                  The operand-bandwidth roof used for both generations, not HBM capacity. GB300's larger memory capacity is not a bandwidth
+                  multiplier; memory fit needs the separate memory study.
+                </td>
               </tr>
               <tr>
                 <td>NVLink</td>
+                <td>900 GB/s / GPU, one direction</td>
                 <td>900 GB/s / GPU, one direction</td>
                 <td>
                   Edward's one-direction NVLink budget. Actual collective bandwidth and contention can lower effective service; do not double this
@@ -96,8 +104,9 @@
               <tr>
                 <td>Scale-out network</td>
                 <td>100 GB/s / GPU, reference input</td>
+                <td>100 GB/s / GPU, reference input</td>
                 <td>
-                  Matches Edward's 800-Gbit/s GB300 network assumption. It is not a measurement of this GB200 allocation. Set 50 GB/s for a
+                  Matches Edward's 800-Gbit/s GB300 network assumption, not an intrinsic GPU property or a measured allocation rate. Set 50 GB/s for a
                   400-Gbit/s-equivalent per-GPU budget, or the correct shared NIC budget for the system being modeled.
                 </td>
               </tr>
@@ -107,9 +116,10 @@
         <p>
           The inputs are synchronized with <a href="https://deepseek-v3.ezyang.com/studies/kimi-k3.html">Edward Yang's current K3 analysis</a>:
           practical sustained targets of 1.8 PFLOP/s BF16 and 3.6 PFLOP/s MXFP8, 900 GB/s one-way NVLink, and 100 GB/s scale-out. His sustained
-          compute targets are empirically informed model inputs, not NVIDIA's spec peaks. We apply that rate set to the configured layout; it is not a
-          claim that GB200 and GB300 have identical sustained performance or that this GB200 cluster supplies his NIC budget. FLOPs, bytes and time
-          remain analytically derived; measured end-to-end throughput and FakePG runtime are not used to fit the result.
+          compute targets are empirically informed model inputs, not NVIDIA's spec peaks. The GB200 profile explicitly borrows them until practical
+          GB200 rates are provided. Identical rate inputs produce identical modeled times for the same recipe; this does not claim identical sustained
+          GB200/GB300 performance. Edit the compute and bandwidth inputs for the hardware and network being modeled. Measured end-to-end throughput
+          and FakePG runtime are not used to fit the result.
         </p>
         <div class="equation-pair">
           <article class="card">
@@ -117,7 +127,8 @@
             <p>F = multiply-add FLOPs; B = modeled operand bytes. Arithmetic intensity I = F / B.</p>
           </article>
           <article class="card">
-            <span class="eyebrow">The BF16 ridge</span><strong class="roof-equation">I* = P / &#946;<sub>HBM</sub> = 225 FLOP/B</strong>
+            <span class="eyebrow">The configured BF16 ridge</span
+            ><strong class="roof-equation">I* = P / &#946;<sub>HBM</sub> = <span id="hardware-bf16-ridge">225 FLOP/B</span></strong>
             <p>Left of the ridge, fewer HBM bytes help. Right of it, the compute ceiling matters. A point under a roof need not attain that roof.</p>
           </article>
         </div>
@@ -154,11 +165,15 @@ Separate distributed model:
         <div class="eyebrow">Change a shape, watch a roof move</div>
         <h2>Configure a recipe and calculate its roofline</h2>
         <p>
-          Start with the default 512-GB200 recipe below, then choose your own GPU count, parallelism, batch, precision, lifecycle and hardware rates.
-          Every result updates from those inputs. The current model supports TP1 and ordinary 1F1B with one contiguous stage per rank, not virtual
-          pipeline schedules. Changing rows or microbatches changes the global batch; changing CP changes the number of independent data replicas.
-          Memory feasibility still needs
+          Start with the default 512-GB200 recipe below, then choose GB200 or GB300, GPU count, parallelism, batch, precision, lifecycle and hardware
+          rates. Every result updates from those inputs. The current model supports TP1 and ordinary 1F1B with one contiguous stage per rank, not
+          virtual pipeline schedules. Changing rows or microbatches changes the global batch; changing CP changes the number of independent data
+          replicas. Memory feasibility still needs
           <a href="./kimi-k3-memory.html#lab">its own budget</a>.
+        </p>
+        <p class="note">
+          Switching GPUs loads that hardware profile's reference rates without changing the recipe. Rates remain editable. Scenario buttons change
+          only their named inputs and preserve the selected hardware and custom rates; the reset button restores the complete default.
         </p>
         <details class="fold">
           <summary>Default analyzed recipe: 512 GB200 GPUs</summary>
@@ -171,6 +186,10 @@ Separate distributed model:
                 </tr>
               </thead>
               <tbody>
+                <tr>
+                  <td>Hardware profile</td>
+                  <td>GB200; uncalibrated GB300 compute-rate proxy. Replace with practical GB200 rates for a hardware comparison.</td>
+                </tr>
                 <tr>
                   <td>Parallelism</td>
                   <td>PP8 / CP1 / TP1 / DP64 / EP64; dense FSDP64, expert FSDP1</td>
@@ -203,13 +222,19 @@ Separate distributed model:
           </p>
         </details>
         <div class="preset-bar" aria-label="Illustrative roofline scenarios">
-          <button type="button" data-preset="baseline">4K BF16 / Edward's SOL rates</button
-          ><button type="button" data-preset="mxfp8">4K MXFP8 experts / Edward's SOL rates</button
+          <button type="button" data-preset="baseline">Reset: 512 GB200 / BF16</button
+          ><button type="button" data-preset="mxfp8">MXFP8 routed experts</button
           ><button type="button" data-preset="ep1">Small expert GEMMs / EP1</button>
-          <button type="button" data-preset="split">EP across eight domains</button><button type="button" data-preset="long">64K with CP16</button>
+          <button type="button" data-preset="split">8 ranks / NVLink domain</button><button type="button" data-preset="long">64K with CP16</button>
           <button type="button" data-preset="retain">Retain compute views</button>
         </div>
         <form id="roof-controls" class="card controls" onsubmit="return false">
+          <label
+            >GPU model<select id="roof-hardware" aria-describedby="roof-hardware-note">
+              <option value="gb200" selected>GB200 / uncalibrated proxy</option>
+              <option value="gb300">GB300 / practical target</option>
+            </select></label
+          >
           <label
             >GPU count<select id="roof-world">
               <option>64</option>
@@ -334,17 +359,21 @@ Separate distributed model:
               <option value="nvlink">NVLink</option>
             </select></label
           >
-          <label>BF16 SOL rate, TFLOP/s<input id="roof-gemm" type="number" min="100" max="2500" step="100" value="1800" /></label>
-          <label>MXFP8 SOL rate, TFLOP/s<input id="roof-fp8Gemm" type="number" min="100" max="5000" step="100" value="3600" /></label>
-          <label>HBM ceiling, TB/s<input id="roof-hbm" type="number" min="0.5" max="8" step="0.5" value="8" /></label>
-          <label>NVLink, one-way GB/s<input id="roof-nvl" type="number" min="25" max="900" step="25" value="900" /></label>
-          <label>Network, one-way GB/s<input id="roof-network" type="number" min="5" max="200" step="5" value="100" /></label>
+          <label>BF16 SOL rate, TFLOP/s<input id="roof-gemm" type="number" min="100" max="2500" step="any" value="1800" /></label>
+          <label>MXFP8 SOL rate, TFLOP/s<input id="roof-fp8Gemm" type="number" min="100" max="5000" step="any" value="3600" /></label>
+          <label>HBM ceiling, TB/s<input id="roof-hbm" type="number" min="0.5" max="8" step="any" value="8" /></label>
+          <label>NVLink, one-way GB/s<input id="roof-nvl" type="number" min="25" max="900" step="any" value="900" /></label>
+          <label>Network, one-way GB/s<input id="roof-network" type="number" min="5" max="200" step="any" value="100" /></label>
         </form>
+        <p id="roof-hardware-note" class="note" role="status">
+          GB200: the compute preset uses Edward's GB300 targets as an uncalibrated proxy. Replace them with practical GB200 rates before comparing the
+          two GPUs. The NIC budget is a separate system assumption; hardware selection does not establish memory fit.
+        </p>
         <p id="roof-warning" class="warning" role="status" hidden></p>
         <p id="roof-shape" class="shape-caption"></p>
         <div class="table-scroll card" aria-live="polite">
           <table id="roof-recipe-results">
-            <caption>
+            <caption id="roof-result-caption">
               Roofline for the configured recipe
             </caption>
             <thead>
