@@ -78,3 +78,42 @@ test("Engram separates all stored table parameters from the 48 rows accessed per
   );
   assert.deepEqual(M.recentNgrams("York")[0].tokens, ["<pad>", "York"]);
 });
+
+test("the worked search masks future positions and restricts Reindex to the Full layer's candidate blocks", () => {
+  const full = M.attentionExample("Full");
+  const reindex = M.attentionExample("Reindex");
+  assert.equal(full.memoryEntries, 25);
+  assert.equal(full.scoredPositions.length, 25);
+  assert.deepEqual(full.selected, [2, 17, 22]);
+  assert.deepEqual(reindex.selected, [1, 18, 23]);
+  assert.equal(reindex.scoredPositions.length, 12);
+  assert.deepEqual(reindex.candidatePositions, full.candidatePositions);
+  assert.ok(!reindex.scoredPositions.includes(10));
+  for (const example of [full, reindex]) {
+    assert.ok(example.selected.every((position) => position <= example.currentPosition));
+    assert.ok(example.positions.filter((position) => !position.visible).every((position) => position.score === null && !position.candidate));
+  }
+});
+
+test("Reuse keeps the latest selection and shared KV while performing no new index search", () => {
+  const reindex = M.attentionExample("Reindex");
+  const reuse = M.attentionExample("Reuse");
+  assert.deepEqual(reuse.selected, reindex.selected);
+  assert.deepEqual(reuse.scoredPositions, []);
+  assert.equal(reuse.kvOwner, 21);
+  assert.equal(reuse.indexOwner, 29);
+  assert.equal(reuse.memoryEntries, reindex.memoryEntries);
+});
+
+test("bounded SwiGLU caps only the gate's upper end, bounds both up ends, and uses ordinary SiLU", () => {
+  const upper = M.boundedSwiGLU(12, -14);
+  assert.equal(upper.gate, 10);
+  assert.equal(upper.up, -10);
+  assert.equal(upper.product, (10 / (1 + Math.exp(-10))) * -10);
+  const lower = M.boundedSwiGLU(-15, 12);
+  assert.equal(lower.gate, -15);
+  assert.equal(lower.up, 10);
+  const inside = M.boundedSwiGLU(2, 3);
+  assert.equal(inside.product, (2 / (1 + Math.exp(-2))) * 3);
+  assert.equal(M.boundedSwiGLU(0, 9).product, 0);
+});
