@@ -149,13 +149,60 @@ test("precision preset preserves lifecycle and communication inputs affect the r
   assert.equal(Number(ui.get("roof-recipe-throughput").dataset.throughput), R.calculate().resourceTokensPerSecondPerGPU);
 });
 
+test("hardware selection loads reference rates without changing the configured recipe (DOM test double)", () => {
+  const ui = controller();
+  assert.equal(ui.get("roof-hardware").value, "gb200");
+  assert.equal(ui.get("roof-hardware-note").dataset.computeBasis, "gb300-reference-proxy");
+  assert.match(ui.get("roof-hardware-note").textContent, /uncalibrated GB200 proxy/);
+  ui.change({ world: 256, pp: 4, mbs: 32, seq: 8192, precision: "mxfp8-experts", gemm: 1234.5, network: 50 });
+  ui.change({ hardware: "gb300" });
+  const expected = R.calculate({ hardware: "gb300", world: 256, pp: 4, mbs: 32, seq: 8192, precision: "mxfp8-experts" });
+  assert.equal(Number(ui.get("roof-world").value), 256);
+  assert.equal(Number(ui.get("roof-pp").value), 4);
+  assert.equal(Number(ui.get("roof-mbs").value), 32);
+  assert.equal(Number(ui.get("roof-seq").value), 8192);
+  assert.equal(ui.get("roof-precision").value, "mxfp8-experts");
+  for (const key of R.rateKeys) assert.equal(Number(ui.get(`roof-${key}`).value), R.hardwareProfiles.gb300.rates[key]);
+  assert.equal(ui.get("roof-hardware-note").dataset.hardware, "gb300");
+  assert.equal(ui.get("roof-hardware-note").dataset.computeBasis, "gb300-practical-target");
+  assert.match(ui.get("roof-result-caption").textContent, /256 GB300 GPUs/);
+  assert.match(ui.get("roof-shape").textContent, /GB300: 256 = PP4 x CP1 x DP64/);
+  assert.equal(Number(ui.get("roof-recipe-throughput").dataset.throughput), expected.resourceTokensPerSecondPerGPU);
+  ui.change({ hardware: "gb200" });
+  assert.equal(ui.get("roof-hardware-note").dataset.computeBasis, "gb300-reference-proxy");
+  assert.match(ui.get("roof-result-caption").textContent, /256 GB200 GPUs/);
+  assert.equal(Number(ui.get("roof-recipe-throughput").dataset.throughput), expected.resourceTokensPerSecondPerGPU);
+});
+
+test("scenario buttons preserve hardware and custom rates while reset restores 512 GB200 (DOM test double)", () => {
+  const ui = controller();
+  ui.change({ hardware: "gb300" });
+  ui.change({ world: 256, pp: 4, mbs: 32, gemm: 1234.5, hbm: 6.2, network: 50 });
+  const input = { hardware: "gb300", world: 256, pp: 4, mbs: 32, gemm: 1234.5, hbm: 6.2, network: 50, precision: "mxfp8-experts" };
+  ui.preset("mxfp8");
+  for (const [key, value] of Object.entries(input)) assert.equal(String(ui.get(`roof-${key}`).value), String(value));
+  assert.match(ui.get("roof-hardware-note").textContent, /Custom input overrides: gemm, hbm, network/);
+  assert.match(ui.get("roof-hardware-note").textContent, /no calibration measurements attached/);
+  assert.equal(ui.get("hardware-bf16-ridge").textContent, `${(input.gemm / input.hbm).toLocaleString("en-US", { maximumFractionDigits: 2 })} FLOP/B`);
+  assert.equal(Number(ui.get("roof-recipe-throughput").dataset.throughput), R.calculate(input).resourceTokensPerSecondPerGPU);
+  ui.preset("baseline");
+  for (const [key, value] of Object.entries(R.defaults)) assert.equal(String(ui.get(`roof-${key}`).value), String(value));
+  assert.match(ui.get("roof-result-caption").textContent, /512 GB200 GPUs/);
+  assert.equal(Number(ui.get("roof-recipe-throughput").dataset.throughput), R.calculate().resourceTokensPerSecondPerGPU);
+});
+
 test("JSON and CSV exports retain the configured world and recipe-specific results (DOM test double)", () => {
   const ui = controller();
-  ui.change({ world: 256, pp: 4, mbs: 32, precision: "mxfp8-experts" });
-  const expected = R.calculate({ world: 256, pp: 4, mbs: 32, precision: "mxfp8-experts" });
+  ui.change({ hardware: "gb300" });
+  ui.change({ world: 256, pp: 4, mbs: 32, precision: "mxfp8-experts", network: 50 });
+  const expected = R.calculate({ hardware: "gb300", world: 256, pp: 4, mbs: 32, precision: "mxfp8-experts", network: 50 });
   ui.get("export-json").click();
   const json = JSON.parse(ui.downloads[0].content);
   assert.equal(json.config.world, 256);
+  assert.equal(json.config.hardware, "gb300");
+  assert.equal(json.hardware.computeBasis, "gb300-practical-target");
+  assert.deepEqual(json.hardware.overriddenRates, ["network"]);
+  assert.deepEqual(json.hardware.referenceRates, R.hardwareProfiles.gb300.rates);
   assert.equal(json.derived.resourceModelTokensPerSecondPerGPU, expected.resourceTokensPerSecondPerGPU);
   assert.equal(json.derived.resourceModelTFLOPsPerGPU, expected.resourceModelTFLOPsPerGPU);
   ui.get("export-csv").click();
@@ -167,5 +214,9 @@ test("JSON and CSV exports retain the configured world and recipe-specific resul
   for (const row of rows) {
     assert.equal(row.length, header.length);
     assert.equal(row[header.indexOf("gpu_count")], "256");
+    assert.equal(row[header.indexOf("gpu_hardware")], "gb300");
+    assert.equal(row[header.indexOf("compute_rate_basis")], "gb300-practical-target");
+    assert.equal(row[header.indexOf("overridden_rates")], "network");
+    assert.equal(row[header.indexOf("network_gb_s")], "50");
   }
 });

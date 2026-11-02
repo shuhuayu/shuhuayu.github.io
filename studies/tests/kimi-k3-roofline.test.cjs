@@ -194,11 +194,59 @@ test("Muon NS estimate counts three logical matrices, not one fused storage tens
 });
 
 test("practical SOL defaults reproduce Edward's current Blackwell K3 rate inputs", () => {
+  assert.equal(R.defaults.hardware, "gb200");
   assert.equal(R.defaults.gemm, 1800);
   assert.equal(R.defaults.fp8Gemm, 3600);
   assert.equal(R.defaults.hbm, 8);
   assert.equal(R.defaults.nvl, 900);
   assert.equal(R.defaults.network, 100);
+});
+
+test("GB200 and GB300 profiles distinguish the uncalibrated proxy from the practical GB300 targets", () => {
+  assert.deepEqual(Object.keys(R.hardwareProfiles), ["gb200", "gb300"]);
+  assert.deepEqual(R.rateKeys, ["gemm", "fp8Gemm", "hbm", "nvl", "network"]);
+  const gb200 = R.calculate();
+  const gb300 = R.calculate({ hardware: "gb300" });
+  assert.deepEqual(R.calculate({ hardware: undefined }), gb200);
+  assert.equal(gb200.hardware.profile, "gb200");
+  assert.equal(gb200.hardware.computeBasis, "gb300-reference-proxy");
+  assert.match(gb200.hardware.note, /uncalibrated GB200 proxy/);
+  assert.equal(gb300.hardware.profile, "gb300");
+  assert.equal(gb300.hardware.computeBasis, "gb300-practical-target");
+  assert.match(gb300.hardware.note, /not a directly measured kernel rate/);
+  for (const result of [gb200, gb300]) {
+    assert.equal(result.config.world, 512);
+    assert.deepEqual(result.hardware.overriddenRates, []);
+    assert.match(result.hardware.networkBasis, /not a measured allocation rate/);
+    assert.equal(result.hardware.source, "https://deepseek-v3.ezyang.com/studies/kimi-k3.html");
+    for (const key of R.rateKeys) assert.equal(result.config[key], R.hardwareProfiles[result.config.hardware].rates[key]);
+  }
+});
+
+test("identical reference rates give identical modeled times, without a hidden GPU-generation multiplier", () => {
+  for (const input of [{}, { world: 256, pp: 4, mbs: 32, precision: "mxfp8-experts", domain: 8, network: 50 }]) {
+    const gb200 = R.calculate({ ...input, hardware: "gb200" });
+    const gb300 = R.calculate({ ...input, hardware: "gb300" });
+    for (const key of ["globalTokens", "issuedFlops", "conventionPerToken", "computeSeconds", "nvlSeconds", "networkSeconds", "sketchSeconds"])
+      assert.equal(gb200[key], gb300[key], key);
+    assert.equal(gb200.resourceTokensPerSecondPerGPU, gb300.resourceTokensPerSecondPerGPU);
+    assert.deepEqual(gb200.stages, gb300.stages);
+  }
+});
+
+test("explicit hardware-rate overrides are used and identified without changing FLOP or token counts", () => {
+  const base = R.calculate({ hardware: "gb200" });
+  // Sensitivity-test inputs, not claimed GB200 measurements.
+  const input = { hardware: "gb200", gemm: 1234.5, fp8Gemm: 2469, hbm: 6.2, nvl: 825, network: 50 };
+  const custom = R.calculate(input);
+  assert.equal(custom.globalTokens, base.globalTokens);
+  assert.equal(custom.issuedFlops, base.issuedFlops);
+  assert.equal(custom.conventionPerToken, base.conventionPerToken);
+  assert.ok(custom.computeSeconds > base.computeSeconds);
+  assert.ok(custom.resourceTokensPerSecondPerGPU < base.resourceTokensPerSecondPerGPU);
+  assert.deepEqual(custom.hardware.overriddenRates, R.rateKeys);
+  for (const key of R.rateKeys) assert.equal(custom.config[key], input[key]);
+  assert.deepEqual(R.calculate(JSON.parse(JSON.stringify(custom.config))), custom);
 });
 
 test("KDA core includes the reference's recurrent and intra-chunk contractions", () => {
@@ -296,6 +344,10 @@ test("every calculator input exists and recipe-specific results agree with the d
   assert.doesNotMatch(header, /headline-|tokens\/s|TFLOP|TF\/s/);
   assert.doesNotMatch(html, /id="headline-/);
   assert.match(html, /Default analyzed recipe: 512 GB200 GPUs/);
+  assert.match(html, /value="gb200" selected/);
+  assert.match(html, /value="gb300"/);
+  assert.match(html, /id="roof-hardware-note"/);
+  assert.match(html, /Identical rate inputs produce identical modeled times/);
   assert.match(html, /Roofline for the configured recipe/);
   assert.match(html, /Historical measurements: comparison only, not the roofline/);
   assert.match(html, /https:\/\/deepseek-v3\.ezyang\.com\/studies\/kimi-k3\.html/);
@@ -331,6 +383,9 @@ test("a communication bottleneck lowers the configured recipe's throughput and m
 
 test("invalid user-facing accounting inputs fail explicitly", () => {
   for (const config of [
+    { hardware: "unknown" },
+    { hardware: "constructor" },
+    { hardware: null },
     { world: 0 },
     { world: -1 },
     { world: 255 },
