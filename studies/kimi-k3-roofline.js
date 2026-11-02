@@ -28,6 +28,21 @@
         changes.push(`${key.toUpperCase()} ${before} -> ${control.value}`);
       }
     }
+    const vp = controls.vp;
+    const vpOptions = [...vp.options];
+    for (const option of vpOptions) {
+      try {
+        R.virtualChunks({ pp: Number(controls.pp.value), vp: Number(option.value) });
+        option.disabled = false;
+      } catch {
+        option.disabled = true;
+      }
+    }
+    if (vpOptions.find((option) => option.value === String(vp.value))?.disabled) {
+      const before = vp.value;
+      vp.value = vpOptions.filter((option) => !option.disabled).at(-1).value;
+      changes.push(`VPP ${before} -> ${vp.value} to keep decoder chunks nonempty`);
+    }
     selectedStage = Math.min(selectedStage, Number(controls.pp.value) - 1);
     return changes;
   }
@@ -218,7 +233,12 @@
       button.textContent = `PP ${candidate.rank}`;
       button.setAttribute("aria-pressed", String(candidate.rank === selectedStage));
       const caption = document.createElement("span");
-      caption.textContent = `L${candidate.owned.layers[0].index + 1}-${candidate.owned.layers.at(-1).index + 1}`;
+      caption.textContent =
+        result.config.vp === 1
+          ? `L${candidate.owned.layers[0].index + 1}-${candidate.owned.layers.at(-1).index + 1}`
+          : candidate.chunks
+              .map((chunk) => `C${chunk.index + 1}: L${chunk.owned.layers[0].index + 1}-${chunk.owned.layers.at(-1).index + 1}`)
+              .join(" / ");
       button.appendChild(caption);
       button.addEventListener("click", () => {
         selectedStage = candidate.rank;
@@ -228,11 +248,11 @@
     }
     text(
       "roof-stage-caption",
-      `PP${stage.rank}: ${stage.kda} KDA + ${stage.mla} MLA; ${stage.moeLayers} MoE layers. ${result.rounds.ag} weight AG rounds and ${
-        result.rounds.rs
-      } gradient RS rounds per layer/group. FP32 update-state tally: ${bytes(stage.stateBytes)}; not a peak memory estimate. Expert FSDP${
-        result.expertFsdp
-      }.`
+      `PP${stage.rank}${result.config.vp > 1 ? `, ${result.config.vp} loop chunks (estimated)` : ""}: ${stage.kda} KDA + ${stage.mla} MLA; ${
+        stage.moeLayers
+      } MoE layers. ${result.rounds.ag} weight AG rounds and ${result.rounds.rs} gradient RS rounds per layer/group. FP32 update-state tally: ${bytes(
+        stage.stateBytes
+      )}; not a peak memory estimate. Expert FSDP${result.expertFsdp}.`
     );
     const body = get("traffic-ledger").querySelector("tbody");
     body.replaceChildren();
@@ -272,9 +292,9 @@
     );
     text(
       "resource-summary",
-      `Resource-load envelope = max(compute, shared NVLink, shared NIC) = ${seconds(
-        result.resourceSeconds
-      )}. Adding the nominal balanced-stage compute bubble (${seconds(result.bubbleSeconds)}) gives the ${seconds(
+      `Resource-load envelope = max(compute, shared NVLink, shared NIC) = ${seconds(result.resourceSeconds)}. Adding the nominal ${
+        result.pipeline.estimated ? "balanced-chunk VPP estimate" : "balanced-stage compute bubble"
+      } (${seconds(result.bubbleSeconds)}) gives the ${seconds(
         result.sketchSeconds
       )} diagnostic sketch. This is not a simulated schedule or validated step-time prediction; different resources may bottleneck on different ranks, and real overlap is not free.`
     );
@@ -286,9 +306,11 @@
     );
     text(
       "bubble-caption",
-      `${result.config.pp} stages x ${result.config.mbs} microbatches, one stage per rank. Scheduled compute: ${seconds(
-        result.computeSeconds
-      )}; nominal fill/drain: ${seconds(result.bubbleSeconds)}. Stage imbalance, pointwise work, CPU stalls and exposed communication are additional.`
+      `${result.config.pp} stages x ${result.config.mbs} microbatches, ${
+        result.config.vp === 1 ? "one stage per rank" : `${result.config.vp} estimated loop chunks per rank`
+      }. Scheduled compute: ${seconds(result.computeSeconds)}; nominal fill/drain: ${seconds(result.bubbleSeconds)}${
+        result.pipeline.estimated ? ` using ${result.pipeline.bubbleFormula}` : ""
+      }. Stage imbalance, pointwise work, CPU stalls and exposed communication are additional.`
     );
     const packets = get("pp-packets");
     packets.replaceChildren();
@@ -300,24 +322,29 @@
       note.textContent = "PP1 has no pipeline send/receive edges.";
       packets.appendChild(note);
     }
-    for (const stage of result.stages.slice(0, -1)) {
+    for (const edge of result.ppEdges.filter((item) => item.remote)) {
       const row = document.createElement("div");
       row.className = "packet-row";
       const label = document.createElement("span");
-      label.textContent = `PP${stage.rank} -> ${stage.rank + 1}`;
+      label.textContent = result.pipeline.estimated
+        ? `C${edge.sourceChunk + 1}/PP${edge.sourceRank} -> C${edge.destinationChunk + 1}/PP${edge.destinationRank}`
+        : `PP${edge.sourceRank} -> ${edge.destinationRank}`;
       const blocks = document.createElement("div");
       blocks.className = "packet-blocks";
-      blocks.setAttribute("aria-label", `One hidden stream and ${stage.after} residual blocks`);
-      for (let i = 0; i <= stage.after; i++) blocks.appendChild(document.createElement("span"));
+      blocks.setAttribute("aria-label", `One hidden stream and ${edge.blocks} residual blocks`);
+      for (let i = 0; i <= edge.blocks; i++) blocks.appendChild(document.createElement("span"));
       const volume = document.createElement("span");
-      volume.textContent = `${bytes((1 + stage.after) * result.tokens * A.D * 2)} / forward`;
+      volume.textContent = `${bytes(edge.forwardBytes)} / forward`;
       row.append(label, blocks, volume);
       packets.appendChild(row);
     }
     const legend = document.createElement("p");
     legend.className = "note";
-    legend.textContent =
-      "Green = one hidden stream; pink = residual blocks. Each block represents [T,7168] in BF16. Backward sends the corresponding gradient packet; the per-stage ledger includes both adjacent edges' outbound traffic.";
+    legend.textContent = `Green = one hidden stream; pink = residual blocks. Each block represents [T,7168] in BF16. Backward sends the corresponding gradient packet; the per-stage ledger includes ${
+      result.pipeline.estimated
+        ? "all incident chunk edges, including wraparound. Full banks are charged at every boundary; residual-cache reuse is not assumed"
+        : "both adjacent edges' outbound traffic"
+    }.`;
     packets.appendChild(legend);
   }
 
@@ -343,8 +370,21 @@
     get("roof-hardware-note").dataset.hardware = c.hardware;
     get("roof-hardware-note").dataset.computeBasis = hardware.computeBasis;
     text("hardware-bf16-ridge", `${number(c.gemm / c.hbm)} FLOP/B`);
-    text("roof-result-caption", `Roofline for the configured recipe: ${c.world} ${hardware.label} GPUs`);
+    text(
+      "roof-result-caption",
+      `Roofline for the configured recipe: ${c.world} ${hardware.label} GPUs${current.pipeline.estimated ? ` / estimated VPP${c.vp}` : ""}`
+    );
+    text(
+      "roof-pipeline-mode",
+      current.pipeline.estimated ? `Estimated VPP${c.vp} / interleaved 1F1B / automatic loop split` : "VPP1 / existing ordinary 1F1B model"
+    );
+    get("roof-pipeline-mode").dataset.vp = c.vp;
+    get("roof-pipeline-mode").dataset.estimated = current.pipeline.estimated;
     const notices = changes.map((change) => `Adjusted to fit the ${c.world}-GPU mesh: ${change}.`);
+    if (current.pipeline.estimated)
+      notices.push(
+        "VPP estimate: balanced-chunk bubble formula and full hidden/residual packets at every inter-rank chunk edge. Residual-cache reuse, communication startup and schedule-specific waits are not modeled; VPP does not divide resident state or prove memory fit."
+      );
     if (c.cp > 1) notices.push("CP attention communication is not priced. The long-context time sketch is incomplete.");
     if (c.policy === "retain")
       notices.push(
@@ -358,9 +398,10 @@
       "roof-shape",
       `${hardware.label}: ${c.world} = PP${c.pp} x CP${c.cp} x DP${current.dp}; dense FSDP${current.stageRanks}; EP${c.ep} x expert FSDP${
         current.expertFsdp
-      }. T_local = ${c.rows} x ${number(c.seq, 0)} / ${c.cp} = ${number(current.tokens, 0)}. FP32 state / ${
-        c.precision === "mxfp8-experts" ? "MXFP8 routed GEMMs, BF16 elsewhere" : "BF16 GEMMs"
-      }.`
+      }${current.pipeline.estimated ? `; estimated VPP${c.vp}` : ""}. T_local = ${c.rows} x ${number(c.seq, 0)} / ${c.cp} = ${number(
+        current.tokens,
+        0
+      )}. FP32 state / ${c.precision === "mxfp8-experts" ? "MXFP8 routed GEMMs, BF16 elsewhere" : "BF16 GEMMs"}.`
     );
     text("roof-tokens", `${number(current.globalTokens / 1e6)}M`);
     get("roof-tokens").dataset.tokens = current.globalTokens;
@@ -381,7 +422,9 @@
     get("roof-recipe-tflops").dataset.tflops = current.resourceModelTFLOPsPerGPU;
     text(
       "roof-sketch-detail",
-      `For this configured recipe: max(compute/HBM, shared NVLink, shared NIC) + nominal ordinary-1F1B bubble. ${
+      `For this configured recipe: max(compute/HBM, shared NVLink, shared NIC) + ${
+        current.pipeline.estimated ? "estimated interleaved VPP bubble" : "nominal ordinary-1F1B bubble"
+      }. ${
         c.cp > 1 ? "CP communication omitted. " : ""
       }Optimizer and non-matmul service omitted; optimistic analytic model, not measured training throughput.`
     );
@@ -403,6 +446,7 @@
     split: { domain: 8 },
     long: { seq: 65536, cp: 16 },
     retain: { policy: "retain" },
+    vpp2: { vp: 2 },
   };
   document.querySelectorAll("[data-preset]").forEach((button) =>
     button.addEventListener("click", () => {
@@ -467,6 +511,14 @@
           }; BF16 Muon Newton-Schulz working copy`,
           config: current.config,
           hardware: current.hardware,
+          pipeline: current.pipeline,
+          pipelineChunks: current.chunks.map((chunk) => ({
+            index: chunk.index,
+            rank: chunk.rank,
+            local: chunk.local,
+            layers: chunk.owned.layers.map((layer) => layer.index),
+          })),
+          pipelineEdges: current.ppEdges,
           structural: { parameters: A.totalParams, activeParameterConvention: A.activeParams, learnedActiveMatrices: A.linearParams },
           derived: {
             dp: current.dp,
@@ -492,6 +544,7 @@
           stages: current.stages.map((stage) => ({
             rank: stage.rank,
             layers: stage.owned.layers.map((layer) => layer.index),
+            logicalChunks: stage.chunks.map((chunk) => chunk.index),
             stateBytes: stage.stateBytes,
             computeSeconds: stage.computeSeconds,
             nvlSeconds: stage.nvlSeconds,
@@ -513,6 +566,10 @@
       "overridden_rates",
       "gpu_count",
       "pp_degree",
+      "virtual_chunks_per_rank",
+      "pipeline_schedule",
+      "vpp_estimated",
+      "logical_chunk_indices",
       "cp_degree",
       "ep_degree",
       "context",
@@ -549,6 +606,10 @@
       current.hardware.overriddenRates.join(";"),
       c.world,
       c.pp,
+      c.vp,
+      current.pipeline.schedule,
+      current.pipeline.estimated,
+      stage.chunks.map((chunk) => chunk.index).join(";"),
       c.cp,
       c.ep,
       c.seq,

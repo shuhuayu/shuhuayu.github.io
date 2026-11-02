@@ -13,8 +13,8 @@
     <link rel="stylesheet" href="./kimi-k3-series.css" />
     <link rel="stylesheet" href="./kimi-k3-roofline.css" />
     <script src="./kimi-k3-accounting.js?v=memory-2" defer></script>
-    <script src="./kimi-k3-roofline-model.js?v=roofline-5" defer></script>
-    <script src="./kimi-k3-roofline.js?v=roofline-5" defer></script>
+    <script src="./kimi-k3-roofline-model.js?v=roofline-6" defer></script>
+    <script src="./kimi-k3-roofline.js?v=roofline-6" defer></script>
   </head>
   <body>
     <main class="page">
@@ -142,9 +142,14 @@
 For every GEMM phase: forward, DGRAD, WGRAD, and any checkpoint replay
   t_op = max(F_op / practical_SOL_rate_for_its_dtype, operand_bytes / HBM_bandwidth)
 
-T_stage   = sum(t_op) + attention_core_FLOPs / BF16_SOL_rate
+T_stage   = sum(t_op over all local chunks) + attention_core_FLOPs / BF16_SOL_rate
 T_compute = max over PP stages(T_stage)
 rho_compute = global_tokens_per_update / (GPU_count * T_compute)
+
+Nominal bubble overhead:
+  VPP = 1: (PP - 1) / M                         [existing ordinary 1F1B model]
+  VPP > 1: (PP - 1) / (M * VPP)                [balanced-chunk interleaved estimate]
+  VPP changes chunk placement and PP edges, not the token or logical FLOP count.
 
 Separate distributed model:
   T_resource = max(T_compute, shared_NVLink_service, shared_NIC_service)
@@ -166,9 +171,9 @@ Separate distributed model:
         <h2>Configure a recipe and calculate its roofline</h2>
         <p>
           Start with the default 512-GB200 recipe below, then choose GB200 or GB300, GPU count, parallelism, batch, precision, lifecycle and hardware
-          rates. Every result updates from those inputs. The current model supports TP1 and ordinary 1F1B with one contiguous stage per rank, not
-          virtual pipeline schedules. Changing rows or microbatches changes the global batch; changing CP changes the number of independent data
-          replicas. Memory feasibility still needs
+          rates. Every result updates from those inputs. VPP1 keeps the existing TP1, ordinary-1F1B model unchanged. VPP2 and VPP4 opt into an
+          estimated interleaved-1F1B mode with an automatic loop-style layer split. Changing rows or microbatches changes the global batch; changing
+          CP changes the number of independent data replicas. Memory feasibility still needs
           <a href="./kimi-k3-memory.html#lab">its own budget</a>.
         </p>
         <p class="note">
@@ -227,6 +232,7 @@ Separate distributed model:
           ><button type="button" data-preset="ep1">Small expert GEMMs / EP1</button>
           <button type="button" data-preset="split">8 ranks / NVLink domain</button><button type="button" data-preset="long">64K with CP16</button>
           <button type="button" data-preset="retain">Retain compute views</button>
+          <button type="button" data-preset="vpp2">VPP2 / estimated interleaving</button>
         </div>
         <form id="roof-controls" class="card controls" onsubmit="return false">
           <label
@@ -252,6 +258,13 @@ Separate distributed model:
               <option>4</option>
               <option selected>8</option>
               <option>16</option>
+            </select></label
+          >
+          <label
+            >Virtual pipeline (VPP)<select id="roof-vp" aria-describedby="roof-vpp-note">
+              <option value="1" selected>1 / existing model</option>
+              <option value="2">2 / interleaved estimate</option>
+              <option value="4">4 / interleaved estimate</option>
             </select></label
           >
           <label
@@ -369,6 +382,11 @@ Separate distributed model:
           GB200: the compute preset uses Edward's GB300 targets as an uncalibrated proxy. Replace them with practical GB200 rates before comparing the
           two GPUs. The NIC budget is a separate system assumption; hardware selection does not establish memory fit.
         </p>
+        <p id="roof-vpp-note" class="note">
+          VPP &gt; 1 is an estimate, not a schedule simulation. Layers are split into PP &times; VPP chunks, assigned round-robin to physical ranks.
+          The nominal bubble assumes balanced virtual chunks. Every inter-rank chunk edge carries full hidden/residual packets forward and matching
+          gradients backward; cache reuse and communication startup are omitted. VPP does not divide resident parameters or establish memory fit.
+        </p>
         <p id="roof-warning" class="warning" role="status" hidden></p>
         <p id="roof-shape" class="shape-caption"></p>
         <div class="table-scroll card" aria-live="polite">
@@ -383,6 +401,10 @@ Separate distributed model:
               </tr>
             </thead>
             <tbody>
+              <tr>
+                <td>Pipeline model</td>
+                <td id="roof-pipeline-mode">VPP1 / existing ordinary 1F1B model</td>
+              </tr>
               <tr>
                 <td>Tokens/update</td>
                 <td>
@@ -688,11 +710,18 @@ Payload bytes = exchanges * local_tokens * latent_width * 2 * remote_copies</pre
 
       <section id="pipeline">
         <div class="eyebrow">The useful FLOPs still need a schedule</div>
-        <h2>Ordinary 1F1B has a bubble, not a ban on overlap</h2>
+        <h2>The unchanged VPP1 model and an opt-in interleaved estimate</h2>
         <p>
           Under balanced stage costs, an ideal ordinary 1F1B schedule has compute-bubble overhead (PP &minus; 1) / M relative to useful scheduled
           work. At PP8 and M64 that is 10.94% overhead, or 9.86% of the compute-plus-bubble interval. Each optimizer update fills and drains its own
           pipeline; a previous warmup update does not remove those structural bubbles.
+        </p>
+        <p>
+          For VPP &gt; 1, the optional estimate uses the nominal interleaved overhead (PP &minus; 1) / (M &times; VPP), as in
+          <a href="https://deepseek-v3.ezyang.com/studies/kimi-k3.html">Edward's K3 analysis</a>. Decoder layers are divided into logical chunks, with
+          embedding and head each counted as one split slot, then assigned in loop order: chunk index modulo PP gives its physical rank. Compute
+          service is summed across all chunks on that rank; the slowest rank still sets the compute envelope. Unequal chunk durations and actual
+          interleaved action ordering are not simulated. Only the nominal bubble term gets the 1/VPP factor, not all computation or memory.
         </p>
         <div class="card">
           <div class="chart-title"><strong>Current ideal compute / fill-and-drain sketch</strong><span id="bubble-label"></span></div>
@@ -715,8 +744,10 @@ Payload bytes = exchanges * local_tokens * latent_width * 2 * remote_copies</pre
         <div id="pp-packets" class="card packet-chart" aria-label="Pipeline payload sizes by outgoing edge"></div>
         <p>
           Interleaving with multiple virtual stages can shrink a stage's gathered working set, revisit a rank with a populated residual cache, and
-          offer different scheduling opportunities. It also adds stage boundaries and communication. It is not modeled by simply dividing the 1F1B
-          bubble or memory by VP. The lab deliberately keeps one contiguous stage per rank.
+          offer different scheduling opportunities. It also adds stage boundaries and communication, including last-rank-to-first-rank wraparound.
+          This estimate conservatively sends every residual bank at each boundary, even on revisits. A residual-cache-aware implementation can move
+          fewer bytes; the estimated PP budget is not a claim about its exact traffic. VPP1 continues to use the original contiguous split and byte
+          arithmetic. Both modes require separate validation of live activations, gathered chunks, graph pools and memory capacity.
         </p>
         <aside class="callout">
           <strong>The schedule and the implementation are different questions.</strong> 1F1B can overlap an independent microbatch's communication and

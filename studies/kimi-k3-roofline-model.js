@@ -22,6 +22,7 @@
     hardware: "gb200",
     world: 512,
     pp: 8,
+    vp: 1,
     cp: 1,
     ep: 64,
     seq: 4096,
@@ -104,15 +105,67 @@
     return stage.layers.length ? Math.ceil((stage.layers[stage.layers.length - 1].index + 1) / A.attnResBlockSize) : 0;
   }
 
+  function virtualChunks(config) {
+    const { pp, vp } = config;
+    if (!Number.isInteger(pp) || !Number.isInteger(vp) || pp < 1 || vp < 1 || pp * vp > A.layers.length)
+      throw new RangeError("PP and VPP must be positive integers with enough decoder layers for their chunks.");
+    if (vp === 1 && (pp - 1) * Math.ceil(A.layers.length / pp) >= A.layers.length)
+      throw new RangeError("The contiguous PP split cannot create empty stages.");
+    if (vp === 1) return Array.from({ length: pp }, (_, rank) => ({ index: rank, rank, local: 0, owned: A.partition(pp, rank) }));
+    const count = pp * vp;
+    const effective = A.layers.length + 2;
+    let start = 0;
+    return Array.from({ length: count }, (_, index) => {
+      // Match the memory study's automatic loop split: embedding and head each occupy one layer slot.
+      const size = Math.floor(effective / count) + Number(index < effective % count) - Number(index === 0) - Number(index === count - 1);
+      if (size < 1) throw new RangeError("The estimated VPP split cannot create empty decoder chunks.");
+      const layers = A.layers.slice(start, start + size);
+      start += size;
+      const front = index === 0 ? A.embedding + A.vision : 0;
+      const back = index === count - 1 ? A.embedding + 3 * D : 0;
+      return {
+        index,
+        rank: index % pp,
+        local: Math.floor(index / pp),
+        owned: {
+          layers,
+          dense: sum(layers, (layer) => layer.dense) + front + back,
+          routed: sum(layers, (layer) => layer.routed),
+          adam: sum(layers, (layer) => layer.adam) + front + back,
+          front,
+          back,
+        },
+      };
+    });
+  }
+
+  function pipelineEdges(chunks, config, tokens) {
+    return chunks.slice(0, -1).map((chunk, index) => {
+      const next = chunks[index + 1];
+      const blocks = ppPacketBlocks(chunk.owned);
+      const forwardBytes = tokens * D * 2 * (1 + blocks);
+      return {
+        sourceChunk: chunk.index,
+        destinationChunk: next.index,
+        sourceRank: chunk.rank,
+        destinationRank: next.rank,
+        remote: chunk.rank !== next.rank,
+        blocks,
+        forwardBytes,
+        bytesPerDirection: config.mbs * forwardBytes,
+      };
+    });
+  }
+
   function calculate(input = {}) {
     const hardware = input.hardware === undefined ? defaults.hardware : input.hardware;
     if (!Object.keys(hardwareProfiles).includes(hardware)) throw new RangeError("Unknown GPU hardware profile.");
     const profile = hardwareProfiles[hardware];
     // Explicit rates override the selected profile; the device name never applies a hidden speed multiplier.
     const config = { ...defaults, ...profile.rates, ...input, hardware };
-    for (const key of ["world", "pp", "cp", "ep", "seq", "rows", "mbs", "segments", "domain", "kdaChunk"])
+    for (const key of ["world", "pp", "vp", "cp", "ep", "seq", "rows", "mbs", "segments", "domain", "kdaChunk"])
       if (!Number.isInteger(config[key]) || config[key] <= 0) throw new RangeError(`${key} must be a positive integer.`);
-    if ((config.pp - 1) * Math.ceil(A.layers.length / config.pp) >= A.layers.length)
+    if (config.vp === 1 && (config.pp - 1) * Math.ceil(A.layers.length / config.pp) >= A.layers.length)
       throw new RangeError("The contiguous PP split cannot create empty stages.");
     for (const [key, values] of Object.entries({
       ac: ["full", "none"],
@@ -133,6 +186,8 @@
       throw new RangeError("Stage-local ranks per NVLink domain must divide the stage group.");
     const full = config.ac === "full";
     const tokens = (config.rows * config.seq) / config.cp;
+    const chunks = virtualChunks(config);
+    const ppEdges = pipelineEdges(chunks, config, tokens);
     const dp = stageRanks / config.cp;
     const globalTokens = dp * config.mbs * config.rows * config.seq;
     const expertFsdp = stageRanks / config.ep;
@@ -151,7 +206,14 @@
       network: (config.ep / Math.min(config.domain, config.ep) - 1) * metadataInput,
     };
     const stages = Array.from({ length: config.pp }, (_, rank) => {
-      const owned = A.partition(config.pp, rank);
+      const ownedChunks = chunks.filter((chunk) => chunk.rank === rank);
+      const owned =
+        config.vp === 1
+          ? ownedChunks[0].owned
+          : {
+              layers: ownedChunks.flatMap((chunk) => chunk.owned.layers),
+              ...Object.fromEntries(["dense", "routed", "adam", "front", "back"].map((key) => [key, sum(ownedChunks, (chunk) => chunk.owned[key])])),
+            };
       const allGemms = owned.layers.flatMap((layer) => A.gemmsForLayer(layer, tokens, config.ep));
       if (rank === config.pp - 1) allGemms.push({ name: "LM head", m: tokens, n: 163840, k: D, groups: 1, head: true });
       const gemms = allGemms.map((gemm) => {
@@ -177,11 +239,22 @@
       const expertRS = collectiveBytes(owned.routed / config.ep, expertFsdp, expertLocal, 4);
       const calls = config.mbs * moeLayers;
       const payload = 2 * Z * tokens * epExchanges * calls;
-      const before = rank === 0 ? 0 : ppPacketBlocks(A.partition(config.pp, rank - 1));
-      const after = rank === config.pp - 1 ? 0 : ppPacketBlocks(owned);
-      // With one stage per rank, the receiving rank has not cached any prior blocks.
-      const packetUnits = (rank > 0 ? 1 + before : 0) + (rank < config.pp - 1 ? 1 + after : 0);
-      const ppBytes = config.mbs * tokens * D * 2 * packetUnits;
+      let before = null;
+      let after = null;
+      let ppBytes;
+      if (config.vp === 1) {
+        // Preserve the original single-stage accounting, including its operation order.
+        before = rank === 0 ? 0 : ppPacketBlocks(A.partition(config.pp, rank - 1));
+        after = rank === config.pp - 1 ? 0 : ppPacketBlocks(owned);
+        const packetUnits = (rank > 0 ? 1 + before : 0) + (rank < config.pp - 1 ? 1 + after : 0);
+        ppBytes = config.mbs * tokens * D * 2 * packetUnits;
+      } else {
+        // Charge forward at the source and a matching full-gradient packet at the destination; no residual-cache reuse.
+        ppBytes = sum(
+          ppEdges.filter((edge) => edge.remote && (edge.sourceRank === rank || edge.destinationRank === rank)),
+          (edge) => edge.bytesPerDirection
+        );
+      }
       const traffic = [
         { key: "payload", label: "Expert token payload", nvl: payload * copies.ranks, network: payload * copies.domains },
         {
@@ -217,6 +290,7 @@
       return {
         rank,
         owned,
+        chunks: ownedChunks,
         gemms,
         kda,
         mla,
@@ -246,7 +320,7 @@
     const nvlSeconds = nvlStage.nvlSeconds;
     const networkSeconds = networkStage.networkSeconds;
     const resourceSeconds = Math.max(computeSeconds, nvlSeconds, networkSeconds);
-    const bubbleRatio = (config.pp - 1) / config.mbs;
+    const bubbleRatio = config.vp === 1 ? (config.pp - 1) / config.mbs : (config.pp - 1) / (config.mbs * config.vp);
     const bubbleSeconds = computeSeconds * bubbleRatio;
     const sketchSeconds = resourceSeconds + bubbleSeconds;
     const causalModelFlops = stageRanks * sum(stages, (stage) => stage.learnedModelFlops + stage.coreModelFlops);
@@ -266,6 +340,14 @@
       .map((gemm) => gemmCost(gemm, config));
     return {
       config,
+      pipeline: {
+        estimated: config.vp > 1,
+        schedule: config.vp === 1 ? "ordinary-1f1b" : "interleaved-1f1b",
+        placement: config.vp === 1 ? "legacy-contiguous" : "automatic-loop",
+        bubbleFormula: config.vp === 1 ? "(PP - 1) / M" : "(PP - 1) / (M * VPP)",
+        payloadPolicy: "full-hidden-and-residual-banks",
+        residualCacheReuse: false,
+      },
       hardware: {
         profile: config.hardware,
         label: profile.label,
@@ -293,6 +375,8 @@
       metadataRounds,
       metadataInput,
       metadataCall,
+      chunks,
+      ppEdges,
       stages,
       computeStage,
       nvlStage,
@@ -313,7 +397,7 @@
     };
   }
 
-  const api = { defaults, hardwareProfiles, rateKeys, calculate, gemmCost, gemmPhases, attentionWork, collectiveBytes, remoteCopies };
+  const api = { defaults, hardwareProfiles, rateKeys, calculate, virtualChunks, gemmCost, gemmPhases, attentionWork, collectiveBytes, remoteCopies };
   if (typeof module === "object" && module.exports) module.exports = api;
   else root.KimiK3Roofline = api;
 })(typeof window === "undefined" ? globalThis : window);
