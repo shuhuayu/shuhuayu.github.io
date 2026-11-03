@@ -390,6 +390,10 @@
       notices.push(
         "Retained compute views and unreduced gradients increase live memory. This is an illustrative lifecycle, not proof that the recipe fits."
       );
+    if (c.policy === "reshard-deferred")
+      notices.push(
+        "Parameters reshard after forward and backward, but unreduced FP32 gradients stay live across microbatches until the final reduction. Nominal collective counts do not establish memory fit."
+      );
     if (c.segments > 1)
       notices.push(`Each logical document is ${number(c.seq / c.segments, 0)} tokens, not a contiguous ${number(c.seq, 0)}-token context.`);
     warning.hidden = notices.length === 0;

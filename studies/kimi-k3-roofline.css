@@ -24,6 +24,18 @@ input:focus-visible {
   outline: 2px solid var(--kda);
   outline-offset: 3px;
 }
+.fsdp-options {
+  margin-top: 24px;
+}
+.fsdp-options h3 {
+  font-size: 14px;
+}
+.fsdp-options p {
+  margin: 10px 0;
+}
+.fsdp-options li + li {
+  margin-top: 6px;
+}
 .roof-equation {
   display: block;
   margin-top: 12px;

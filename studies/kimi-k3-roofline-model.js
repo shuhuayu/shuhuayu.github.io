@@ -169,7 +169,7 @@
       throw new RangeError("The contiguous PP split cannot create empty stages.");
     for (const [key, values] of Object.entries({
       ac: ["full", "none"],
-      policy: ["reference", "reshard", "retain"],
+      policy: ["reference", "reshard", "retain", "reshard-deferred"],
       precision: ["bf16", "mxfp8-experts"],
       routingMap: ["none", "hybridep"],
       copies: ["assignment", "rank"],
@@ -196,7 +196,9 @@
         ? { ag: 1, rs: 1 }
         : config.policy === "reshard"
           ? { ag: 2 * config.mbs, rs: config.mbs }
-          : { ag: config.mbs + 1, rs: 1 };
+          : config.policy === "reshard-deferred"
+            ? { ag: 2 * config.mbs, rs: 1 }
+            : { ag: config.mbs + 1, rs: 1 };
     const copies = remoteCopies(config);
     const epExchanges = full ? 6 : 4;
     const metadataRounds = config.routingMap === "hybridep" ? (full ? 2 : 1) : 0;
