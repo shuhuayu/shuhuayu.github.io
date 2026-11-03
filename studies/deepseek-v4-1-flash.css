@@ -1192,6 +1192,269 @@ td:first-child {
   color: var(--muted);
   margin-bottom: 0;
 }
+.training-grid a {
+  display: inline-block;
+  margin-top: 14px;
+  font-size: 13px;
+}
+.optimizer-grid,
+.infrastructure-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 22px;
+  margin-top: 26px;
+}
+.optimizer-card,
+.infra-card {
+  min-width: 0;
+  padding: 22px;
+  border-top: 3px solid var(--accent, var(--encoder));
+}
+.optimizer-card p,
+.infra-card p,
+.optimizer-equations p,
+.optimizer-schedule p,
+.infra-validation p,
+.infra-pp li {
+  font-size: 13px;
+  color: var(--muted);
+  line-height: 1.65;
+}
+.optimizer-heads {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+  margin: 16px 0;
+}
+.optimizer-heads span {
+  padding: 10px 4px;
+  border: 1px solid var(--decoder);
+  border-radius: 6px;
+  background: var(--decoder-soft);
+  text-align: center;
+  font-size: 11px;
+}
+.optimizer-memory {
+  display: grid;
+  gap: 8px;
+  margin: 16px 0;
+}
+.optimizer-memory span {
+  padding: 10px 12px;
+  background: var(--gold-soft);
+  border: 1px solid var(--gold);
+  border-radius: 6px;
+  font-family: ui-monospace, monospace;
+  font-size: 13px;
+}
+.optimizer-memory span + span {
+  width: 65%;
+}
+.optimizer-equations,
+.optimizer-demo,
+.optimizer-schedule,
+.infra-pp,
+.infra-validation {
+  min-width: 0;
+  padding: 26px;
+  margin: 26px 0 0;
+}
+.optimizer-equation-grid,
+.optimizer-matrices,
+.infra-pp-equations {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 20px;
+}
+.optimizer-equation-grid > div {
+  min-width: 0;
+  padding: 18px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--card);
+}
+.optimizer-equation-grid strong,
+.infra-pp-equations strong {
+  font-size: 14px;
+}
+.optimizer-math {
+  margin-top: 12px;
+  color: var(--ink);
+  font-family: ui-monospace, monospace;
+  font-size: clamp(12px, 1.35vw, 15px);
+  line-height: 1.8;
+  overflow-wrap: anywhere;
+}
+.optimizer-controls {
+  display: grid;
+  grid-template-columns: auto minmax(120px, 1fr) auto;
+  align-items: center;
+  gap: 18px;
+  margin: 22px 0;
+  font-size: 13px;
+}
+.optimizer-controls output {
+  display: inline-block;
+  min-width: 24px;
+  color: var(--decoder);
+  font-weight: 700;
+  margin-left: 8px;
+}
+.optimizer-matrices > div {
+  min-width: 0;
+}
+.optimizer-matrices h4 {
+  font-size: 14px;
+  margin: 10px 0;
+}
+.optimizer-matrix {
+  width: 100%;
+  min-width: 0;
+  table-layout: fixed;
+  font-family: ui-monospace, monospace;
+  font-size: 12px;
+}
+.optimizer-matrix th,
+.optimizer-matrix td {
+  min-width: 0;
+  padding: 10px 7px;
+  text-align: center;
+  white-space: nowrap;
+}
+.optimizer-matrix td.positive {
+  background: var(--decoder-soft);
+}
+.optimizer-matrix td.negative {
+  background: var(--residual-soft);
+}
+.optimizer-matrix .matrix-rms,
+.optimizer-matrix tfoot td {
+  font-weight: 700;
+}
+.infra-card .infra-question {
+  border-top: 1px solid var(--line);
+  padding-top: 14px;
+  color: var(--ink);
+}
+.infra-pp-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  margin: 20px 0;
+  font-size: 13px;
+}
+.infra-pp-scroll {
+  min-width: 0;
+  overflow-x: auto;
+  padding: 4px 0 14px;
+}
+.infra-pp-flow {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.infra-pp-stage {
+  display: grid;
+  flex: 1 0 170px;
+  gap: 10px;
+  padding: 18px 12px;
+  border: 1px solid var(--decoder);
+  border-radius: 8px;
+  background: var(--decoder-soft);
+  text-align: center;
+}
+.infra-pp-stage strong {
+  font-size: 13px;
+}
+.infra-pp-stage span,
+.infra-pp-stage small {
+  font-size: 12px;
+}
+.infra-pp-stage small {
+  color: var(--muted);
+}
+.infra-pp-link {
+  flex: 0 0 85px;
+  text-align: center;
+  color: var(--decoder);
+}
+.infra-pp-link strong,
+.infra-pp-link span {
+  display: block;
+  font-size: 11px;
+}
+.infra-pp-link span {
+  font-size: 28px;
+}
+.infra-pp-equations {
+  margin-top: 18px;
+  padding: 18px;
+  border-radius: 8px;
+  background: var(--residual-soft);
+}
+.infra-pp h4 {
+  margin-bottom: 8px;
+}
+.infra-pp ol {
+  padding-left: 22px;
+}
+.infra-pp li {
+  margin-bottom: 9px;
+}
+@media (max-width: 1100px) {
+  .optimizer-grid,
+  .infrastructure-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+@media (max-width: 760px) {
+  .optimizer-grid,
+  .infrastructure-grid,
+  .optimizer-equation-grid,
+  .optimizer-matrices,
+  .infra-pp-equations {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .optimizer-equations,
+  .optimizer-demo,
+  .optimizer-schedule,
+  .infra-pp,
+  .infra-validation {
+    padding: 16px;
+  }
+  .optimizer-controls {
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 12px;
+  }
+  .optimizer-controls label {
+    grid-column: 1 / -1;
+  }
+  .optimizer-matrix th,
+  .optimizer-matrix td {
+    padding: 9px 2px;
+    font-size: 10px;
+  }
+}
+@media print {
+  .optimizer-grid,
+  .infrastructure-grid,
+  .optimizer-equation-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .optimizer-controls,
+  .infra-pp-controls {
+    display: none;
+  }
+  .optimizer-card,
+  .infra-card,
+  .optimizer-equation-grid > div {
+    break-inside: avoid;
+  }
+  .infra-pp-flow {
+    flex-wrap: wrap;
+  }
+}
 .sources ol {
   padding-left: 22px;
   font-size: 14px;

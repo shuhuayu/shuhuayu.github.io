@@ -1081,6 +1081,137 @@
     for (const label of document.querySelectorAll(".row-gradient-label")) label.textContent = backward ? "dRow" : "Value";
   }
 
+  const optimizerInput = [
+    [8, 1, -0.25, 0.5],
+    [1, 4, -2, 1],
+    [-0.5, 1, 3, -1],
+    [0.25, -2, 1, 5],
+  ];
+  const rms = (values) => Math.sqrt(values.reduce((sum, value) => sum + value * value, 0) / values.length);
+
+  function fillOptimizerMatrix(id, matrix) {
+    const table = byId(id);
+    const cell = (tag, value) => {
+      const element = document.createElement(tag);
+      element.textContent = typeof value === "number" ? value.toFixed(3) : value;
+      if (tag === "th") element.scope = "row";
+      return element;
+    };
+    const body = matrix.map((values, row) => {
+      const line = document.createElement("tr");
+      line.append(cell("th", String(row)));
+      for (const value of values) {
+        const element = cell("td", value);
+        element.className = value < 0 ? "negative" : "positive";
+        line.append(element);
+      }
+      const norm = cell("td", rms(values));
+      norm.className = "matrix-rms";
+      line.append(norm);
+      return line;
+    });
+    table.tBodies[0].replaceChildren(...body);
+    const footer = document.createElement("tr");
+    footer.append(cell("th", "RMS"));
+    for (let column = 0; column < matrix[0].length; column++) footer.append(cell("td", rms(matrix.map((row) => row[column]))));
+    footer.append(cell("td", "—"));
+    table.tFoot.replaceChildren(footer);
+  }
+
+  function renderOptimizer() {
+    const steps = Number(byId("optimizer-iterations").value);
+    let matrix = optimizerInput.map((row) => [...row]);
+    for (let step = 1; step <= steps; step++) {
+      if (step % 2) {
+        matrix = matrix.map((row) => {
+          const norm = Math.sqrt(row.reduce((sum, value) => sum + value * value, 0)) + 1e-20;
+          return row.map((value) => value / norm);
+        });
+      } else {
+        const norms = matrix[0].map((_, column) => Math.sqrt(matrix.reduce((sum, row) => sum + row[column] * row[column], 0)) + 1e-20);
+        matrix = matrix.map((row) => row.map((value, column) => value / norms[column]));
+      }
+    }
+    if (steps) matrix = matrix.map((row) => row.map((value) => 2 * value));
+    fillOptimizerMatrix("optimizer-input-matrix", optimizerInput);
+    fillOptimizerMatrix("optimizer-result-matrix", matrix);
+    byId("optimizer-iteration-label").textContent = String(steps);
+    byId("optimizer-iterations").setAttribute(
+      "aria-valuetext",
+      steps ? String(steps) + " iterations; last normalization: " + (steps % 2 ? "rows" : "columns") : "Original Nesterov update"
+    );
+    byId("optimizer-result-title").textContent = steps ? "After: Δ = 2U, iteration " + steps : "Original input before balancing";
+    byId("optimizer-step-description").textContent = steps
+      ? "Iteration " +
+        steps +
+        " ends with " +
+        (steps % 2 ? "row normalization: row RMS is 1; column RMS approaches 1." : "column normalization: column RMS is 1; row RMS approaches 1.")
+      : "Iteration 0: the original Nesterov update, before normalization and the final scale.";
+  }
+
+  function renderPipelineExample() {
+    const partitions = {
+      2: [
+        { name: "A", start: 21, end: 30 },
+        { name: "B", start: 31, end: 40 },
+      ],
+      3: [
+        { name: "A", start: 21, end: 30 },
+        { name: "B1", start: 31, end: 35 },
+        { name: "B2", start: 36, end: 40 },
+      ],
+      4: [
+        { name: "A", start: 21, end: 25 },
+        { name: "B", start: 26, end: 30 },
+        { name: "C", start: 31, end: 35 },
+        { name: "D", start: 36, end: 40 },
+      ],
+    };
+    const stages = partitions[byId("infra-pp-stages").value];
+    const flow = byId("infra-pp-flow");
+    const items = [];
+    for (const [index, stage] of stages.entries()) {
+      if (index) {
+        const link = document.createElement("div");
+        link.className = "infra-pp-link";
+        const label = document.createElement("strong");
+        label.textContent = "H" + stages[index - 1].end + " + G21";
+        const arrow = document.createElement("span");
+        arrow.textContent = "→";
+        arrow.setAttribute("aria-hidden", "true");
+        link.append(label, arrow);
+        items.push(link);
+      }
+      const box = document.createElement("div");
+      box.className = "infra-pp-stage";
+      const title = document.createElement("strong");
+      title.textContent = "Stage " + stage.name + " / L" + stage.start + "–" + stage.end;
+      const state = document.createElement("span");
+      state.textContent = index === 0 ? "Produces and reads G21" : index === stages.length - 1 ? "Reads G21" : "Reads and forwards G21";
+      const detail = document.createElement("small");
+      detail.textContent = "Own hidden states, Q, and local KV";
+      box.append(title, state, detail);
+      items.push(box);
+    }
+    flow.replaceChildren(...items);
+    flow.setAttribute("aria-label", "Stage A produces G21; the same global KV is used by " + stages.length + " pipeline stages.");
+    const backward = [];
+    for (let index = stages.length - 1; index > 0; index--) {
+      const item = document.createElement("li");
+      const stage = stages[index];
+      const contributions = stages
+        .slice(index)
+        .map((consumer) => "dG_" + consumer.name)
+        .join(" + ");
+      item.textContent = stage.name + " returns its hidden-state gradient and " + contributions + " to " + stages[index - 1].name + ".";
+      backward.push(item);
+    }
+    const producer = document.createElement("li");
+    producer.textContent = "A adds dG_A, then backpropagates the sum through the L21 projection into its weights and H20.";
+    backward.push(producer);
+    byId("infra-pp-backward").replaceChildren(...backward);
+  }
+
   function initTheme() {
     let saved;
     try {
@@ -1136,4 +1267,12 @@
   renderSelection();
   renderSwiGLU();
   renderOwnership();
+  byId("optimizer-iterations").addEventListener("input", renderOptimizer);
+  byId("optimizer-reset").addEventListener("click", () => {
+    byId("optimizer-iterations").value = "0";
+    renderOptimizer();
+  });
+  byId("infra-pp-stages").addEventListener("change", renderPipelineExample);
+  renderOptimizer();
+  renderPipelineExample();
 })();
