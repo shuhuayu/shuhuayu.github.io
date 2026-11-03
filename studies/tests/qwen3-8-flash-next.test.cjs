@@ -110,3 +110,102 @@ test("every demo prefix preserves causality, whole blocks, and the budget-plus-t
     }
   }
 });
+
+test("the residual example starts with copies but produces distinct stream updates", () => {
+  const first = model.residualExample("first");
+  for (const stream of first.hidden) assert.deepEqual(stream, [1, 2]);
+  assert.equal(new Set(first.writeGates).size, 4);
+  assert.equal(new Set(first.output.map((stream) => JSON.stringify(stream))).size, 4);
+  for (const bias of [-12, 0, 12]) {
+    const example = model.residualExample("later", bias);
+    for (let stream = 0; stream < 4; stream++) {
+      assert(example.writeGates[stream] > 0 && example.writeGates[stream] < 2);
+      for (let channel = 0; channel < 2; channel++) {
+        assert(example.readGates[stream][channel] > 0 && example.readGates[stream][channel] < 1);
+        assert(
+          Math.abs(example.output[stream][channel] - example.hidden[stream][channel] - example.writeGates[stream] * example.update[channel]) < 1e-12
+        );
+      }
+    }
+  }
+});
+
+test("the delta-rule example can forget, preserve, and overwrite an addressed value", () => {
+  const overwrite = model.deltaExample(0.9, 1);
+  for (let channel = 0; channel < 2; channel++) assert(Math.abs(overwrite.output[channel] - overwrite.value[channel]) < 1e-12);
+  assert.deepEqual(overwrite.state[1], [2.7, 3.6]);
+  assert.deepEqual(model.deltaExample(1, 0).state, [
+    [1, 2],
+    [3, 4],
+  ]);
+  assert.deepEqual(model.deltaExample(0, 0).state, [
+    [0, 0],
+    [0, 0],
+  ]);
+  assert.deepEqual(model.deltaExample(0.9, 1, "other").output, [2.7, 3.6]);
+});
+
+test("the lookup addresses match the independently evaluated pinned Python hash reference", () => {
+  assert.deepEqual(
+    model
+      .lexicalHashes([10, 20, 30])
+      .at(-1)
+      .map((entry) => entry.row),
+    [
+      9878115, 26555603, 54895210, 62571545, 80580723, 119917398, 128922427, 147596134, 168936175, 195223391, 219226064, 233524685, 246670267,
+      279816194, 297531600, 306108296,
+    ]
+  );
+  const rows = model.lexicalHeadSizes.reduce((sum, size) => sum + size, 0);
+  assert.equal(Math.ceil(rows / 128) * 128, 320001536);
+  assert.deepEqual(
+    model
+      .lexicalHashes([248319, 248318, 248317])
+      .at(-1)
+      .map((entry) => entry.row),
+    [
+      18204799, 30983358, 48501439, 78291015, 93570287, 105570872, 133797543, 158521149, 178582661, 198209494, 218766759, 226248959, 248124088,
+      270195567, 290929800, 314927571,
+    ]
+  );
+  for (const entries of model.lexicalHashes([248319, 248318, 248317, 248044])) {
+    for (const entry of entries) {
+      assert(entry.bucket >= 0 && entry.bucket < model.lexicalHeadSizes[entry.head]);
+      assert(entry.row >= entry.offset && entry.row < entry.offset + model.lexicalHeadSizes[entry.head]);
+    }
+  }
+});
+
+test("hashes encode ordered token content while document and EOS boundaries reset history", () => {
+  const baseline = model.lexicalHashes([10, 20, 30]).at(-1);
+  assert.deepEqual(model.lexicalHashes([10, 20, 30], [100, 101, 102]).at(-1), baseline);
+  const differentOlderToken = model.lexicalHashes([40, 20, 30]).at(-1);
+  assert.deepEqual(differentOlderToken.slice(0, 8), baseline.slice(0, 8));
+  assert.notDeepEqual(differentOlderToken.slice(8), baseline.slice(8));
+  assert.notDeepEqual(model.lexicalHashes([10, 50, 30]).at(-1), baseline);
+  const fresh = model.lexicalHashes([30])[0];
+  assert.deepEqual(model.lexicalHashes([10, 20, 30], [0, 1, 0]).at(-1), fresh);
+  assert.deepEqual(model.lexicalHashes([10, 248044, 30]).at(-1), fresh);
+});
+
+test("processed visual grids preserve temporal groups and two-by-two spatial merging", () => {
+  assert.deepEqual(model.visualTokens(448, 2), { spatial: 28, temporal: 1, patches: 784, merged: 196 });
+  assert.equal(model.visualTokens(448, 4).merged, 392);
+  assert.equal(model.visualTokens(896, 8).patches, 12544);
+  assert.equal(model.visualTokens(896, 8).merged, 3136);
+});
+
+test("SP changes carried activation sizes without shrinking the selected expert workload", () => {
+  const sharded = model.trainingFootprint(4096, 2, 2, true);
+  const replicated = model.trainingFootprint(4096, 2, 2, false);
+  assert.equal(sharded.residual, 80 * 2 ** 20);
+  assert.equal(sharded.localResidual, 40 * 2 ** 20);
+  assert.equal(replicated.localResidual, sharded.residual);
+  assert.equal(sharded.localResidual / sharded.localSublayer, 4);
+  assert.equal(sharded.assignmentPayload, replicated.assignmentPayload);
+  assert.equal(sharded.assignmentPayload, 200 * 2 ** 20);
+  assert.equal(sharded.tokenMetadata, 64 * 1024);
+  assert.equal(sharded.lexicalRead, 20 * 2 ** 20);
+  assert.equal(sharded.lexicalWeights, audit.groups.lexical_table * 2);
+  assert.equal(sharded.lexicalMoments, audit.groups.lexical_table * 8);
+});
