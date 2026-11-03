@@ -265,16 +265,70 @@ test("the routing-map collective uses one byte per Boolean, not top-k integers",
   assert.equal(stage.traffic.find((item) => item.key === "metadata").nvl, 1536 * 220.5 * 2 ** 20);
 });
 
-test("FSDP round counts distinguish observed, fully resharded and retained views", () => {
+test("FSDP round counts distinguish all four parameter and gradient lifecycles", () => {
   assert.deepEqual(R.calculate().rounds, { ag: 65, rs: 1 });
   assert.deepEqual(R.calculate({ policy: "reshard" }).rounds, { ag: 128, rs: 64 });
   assert.deepEqual(R.calculate({ policy: "retain" }).rounds, { ag: 1, rs: 1 });
+  assert.deepEqual(R.calculate({ policy: "reshard-deferred" }).rounds, { ag: 128, rs: 1 });
   assert.equal(R.calculate().expertFsdp, 1);
   const bytes = R.collectiveBytes(100, 1, 1, 2);
   assert.deepEqual(bytes, { nvl: 0, network: 0 });
   const hierarchical = R.collectiveBytes(100, 64, 8, 2);
   assert.equal(hierarchical.nvl, (200 * 63) / 64);
   assert.equal(hierarchical.network, (200 * 7) / 8 / 8);
+});
+
+test("deferred reduction keeps two gathers per microbatch without multiplying rounds by VPP", () => {
+  for (const mbs of [1, 8, 32, 64]) {
+    for (const vp of [1, 2, 4]) {
+      const result = R.calculate({ hardware: "gb300", world: 256, pp: 4, vp, mbs, policy: "reshard-deferred" });
+      assert.deepEqual(result.rounds, { ag: 2 * mbs, rs: 1 });
+      assert.equal(result.expertFsdp, 1);
+      assert.equal(result.globalTokens, 64 * mbs * 4096);
+    }
+  }
+});
+
+test("reshard-deferred removes only repeated gradient reductions from the fully resharded traffic budget", () => {
+  for (const world of [256, 512]) {
+    for (const vp of [1, 2, 4]) {
+      for (const domain of [8, 64]) {
+        const input = { hardware: "gb300", world, pp: 4, vp, mbs: 32, domain, precision: "mxfp8-experts" };
+        const result = R.calculate({ ...input, policy: "reshard-deferred" });
+        const perMicrobatch = R.calculate({ ...input, policy: "reshard" });
+        const reference = R.calculate({ ...input, policy: "reference" });
+        assert.equal(result.globalTokens, perMicrobatch.globalTokens);
+        assert.equal(result.issuedFlops, perMicrobatch.issuedFlops);
+        assert.equal(result.computeSeconds, perMicrobatch.computeSeconds);
+        for (const stage of result.stages) {
+          const control = perMicrobatch.stages[stage.rank];
+          const denseRS = R.collectiveBytes(stage.owned.dense, result.stageRanks, Math.min(domain, result.stageRanks), 4);
+          const expertRS = R.collectiveBytes(
+            stage.owned.routed / result.config.ep,
+            result.expertFsdp,
+            Math.min(result.expertFsdp, Math.max(1, domain / result.config.ep)),
+            4
+          );
+          assert.equal(stage.stateBytes, control.stateBytes);
+          assert.deepEqual(stage.gemms, control.gemms);
+          for (const item of stage.traffic) {
+            const original = control.traffic.find((entry) => entry.key === item.key);
+            if (item.key !== "fsdp") {
+              assert.deepEqual(item, original);
+              continue;
+            }
+            const oldReference = reference.stages[stage.rank].traffic.find((entry) => entry.key === "fsdp");
+            for (const link of ["nvl", "network"]) {
+              close(original[link] - item[link], 31 * (denseRS[link] + expertRS[link]));
+              close(item[link], (64 + 2) * ((denseRS[link] + expertRS[link]) / 2));
+              assert.ok(item[link] <= original[link]);
+              assert.ok(item[link] >= oldReference[link]);
+            }
+          }
+        }
+      }
+    }
+  }
 });
 
 test("PP sends hidden plus the full first-visit residual stack", () => {

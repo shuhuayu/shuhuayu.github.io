@@ -231,6 +231,53 @@ test("VPP selector disables empty-chunk splits and normalizes only unsupported V
   assert.equal(Number(ui.get("roof-recipe-throughput").dataset.throughput), expected.resourceTokensPerSecondPerGPU);
 });
 
+test("fourth FSDP option updates the GB300 ledger and exports while preserving the default lifecycle (DOM test double)", () => {
+  const ui = controller();
+  assert.deepEqual(
+    [...ui.get("roof-policy").options].map((option) => option.value),
+    ["reference", "reshard", "retain", "reshard-deferred"]
+  );
+  assert.equal(ui.get("roof-policy").value, "reference");
+  const html = readFileSync(join(__dirname, "..", "kimi-k3-roofline.html"), "utf8");
+  const explanation = html.match(/<section id="roof-fsdp-options"[^>]*>([\s\S]*?)<\/section>/)[1];
+  assert.match(html, /id="roof-policy" aria-describedby="roof-fsdp-options"/);
+  assert.match(html, /id="roof-fsdp-options" class="fsdp-options note"/);
+  assert.equal((explanation.match(/<li>/g) || []).length, 4);
+  assert.match(explanation, /M=32 gives 64 AG \/ 1 RS/);
+  assert.match(explanation, /Backward prefetch can improve overlap/);
+  const input = { hardware: "gb300", world: 256, pp: 4, vp: 2, mbs: 32, policy: "reshard-deferred", precision: "mxfp8-experts" };
+  ui.change({ hardware: "gb300" });
+  ui.change(input);
+  const expected = R.calculate(input);
+  assert.match(ui.get("roof-stage-caption").textContent, /64 weight AG rounds and 1 gradient RS rounds/);
+  assert.match(ui.get("roof-warning").textContent, /unreduced FP32 gradients stay live across microbatches/);
+  assert.equal(Number(ui.get("roof-recipe-throughput").dataset.throughput), expected.resourceTokensPerSecondPerGPU);
+  const fsdpRow = ui.get("traffic-ledger").body.children.find((row) => row.dataset.traffic === "fsdp");
+  const fsdp = expected.stages[3].traffic.find((item) => item.key === "fsdp");
+  assert.equal(Number(fsdpRow.dataset.nvlBytes), fsdp.nvl);
+  assert.equal(Number(fsdpRow.dataset.networkBytes), fsdp.network);
+  ui.get("export-json").click();
+  const json = JSON.parse(ui.downloads[0].content);
+  assert.equal(json.config.policy, "reshard-deferred");
+  assert.deepEqual(
+    json.stages[3].traffic.find((item) => item.key === "fsdp"),
+    fsdp
+  );
+  ui.get("export-csv").click();
+  const [header, ...rows] = ui.downloads[1].content
+    .trim()
+    .split("\n")
+    .map((line) => line.split(","));
+  assert.equal(rows.length, 4);
+  for (const row of rows) {
+    assert.equal(row.length, header.length);
+    assert.equal(row[header.indexOf("fsdp_policy")], "reshard-deferred");
+  }
+  ui.preset("baseline");
+  assert.equal(ui.get("roof-policy").value, "reference");
+  assert.equal(Number(ui.get("roof-recipe-throughput").dataset.throughput), R.calculate().resourceTokensPerSecondPerGPU);
+});
+
 test("JSON and CSV exports retain the configured world, estimated VPP and recipe-specific results (DOM test double)", () => {
   const ui = controller();
   ui.change({ hardware: "gb300" });

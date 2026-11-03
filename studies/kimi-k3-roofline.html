@@ -11,10 +11,10 @@
     <title>Kimi K3: recipe-to-roofline calculator</title>
     <link rel="stylesheet" href="./kimi-k3-memory.css" />
     <link rel="stylesheet" href="./kimi-k3-series.css" />
-    <link rel="stylesheet" href="./kimi-k3-roofline.css" />
+    <link rel="stylesheet" href="./kimi-k3-roofline.css?v=roofline-7" />
     <script src="./kimi-k3-accounting.js?v=memory-2" defer></script>
-    <script src="./kimi-k3-roofline-model.js?v=roofline-6" defer></script>
-    <script src="./kimi-k3-roofline.js?v=roofline-6" defer></script>
+    <script src="./kimi-k3-roofline-model.js?v=roofline-7" defer></script>
+    <script src="./kimi-k3-roofline.js?v=roofline-7" defer></script>
   </head>
   <body>
     <main class="page">
@@ -338,10 +338,11 @@ Separate distributed model:
             </select></label
           >
           <label
-            >FSDP lifecycle<select id="roof-policy">
+            >FSDP lifecycle<select id="roof-policy" aria-describedby="roof-fsdp-options">
               <option value="reference" selected>Reference-like: M+1 AG / 1 RS</option>
               <option value="reshard">Textbook: 2M AG / M RS</option>
               <option value="retain">Retain views: 1 AG / 1 RS</option>
+              <option value="reshard-deferred">Reshard + defer gradients: 2M AG / 1 RS</option>
             </select></label
           >
           <label
@@ -387,6 +388,27 @@ Separate distributed model:
           The nominal bubble assumes balanced virtual chunks. Every inter-rank chunk edge carries full hidden/residual packets forward and matching
           gradients backward; cache reuse and communication startup are omitted. VPP does not divide resident parameters or establish memory fit.
         </p>
+        <section id="roof-fsdp-options" class="fsdp-options note" aria-labelledby="roof-fsdp-title">
+          <h3 id="roof-fsdp-title">Choosing an FSDP lifecycle</h3>
+          <p>M = microbatches per schedule; AG = weight all-gather; RS = gradient reduce-scatter.</p>
+          <ul>
+            <li><strong>Reference-like (M+1 AG / 1 RS):</strong> the 4K reference trace's collective pattern; not a universal FSDP default.</li>
+            <li><strong>Textbook (2M AG / M RS):</strong> reshard parameters after forward and backward; reduce gradients each microbatch.</li>
+            <li>
+              <strong>Retain views (1 AG / 1 RS):</strong> keep compute parameters and accumulated gradients live across the schedule; higher
+              residency.
+            </li>
+            <li>
+              <strong>Reshard + defer gradients (2M AG / 1 RS):</strong> release compute parameters after forward and backward, but keep FP32
+              unreduced gradients until schedule end. This matches the selected 256-GB300 recipe's policy; M=32 gives 64 AG / 1 RS.
+            </li>
+          </ul>
+          <p>
+            These are nominal rounds per sharded FSDP weight unit per update, using BF16 weight gathers and FP32 gradient reduction. VPP does not
+            multiply rounds for the same weights; FSDP degree 1 has no collective traffic. Backward prefetch can improve overlap, but does not remove
+            these nominal gathers. Deferred gradients still need memory; none of these choices proves that a recipe fits.
+          </p>
+        </section>
         <p id="roof-warning" class="warning" role="status" hidden></p>
         <p id="roof-shape" class="shape-caption"></p>
         <div class="table-scroll card" aria-live="polite">
@@ -653,6 +675,15 @@ Payload bytes = exchanges * local_tokens * latent_width * 2 * remote_copies</pre
                 <td>
                   An optimistic lifecycle alternative. Keeps BF16 views and deferred gradients live; requires a different memory budget and runtime
                   support.
+                </td>
+              </tr>
+              <tr>
+                <td>Reshard views, defer gradients</td>
+                <td>2M = 128</td>
+                <td>1</td>
+                <td>
+                  Release parameters after forward and backward; accumulate FP32 unreduced gradients until schedule end. The selected GB300 policy; at
+                  M=32, the nominal counts are 64 gathers and one reduction.
                 </td>
               </tr>
             </tbody>
