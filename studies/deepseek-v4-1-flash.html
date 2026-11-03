@@ -186,6 +186,60 @@
             </div>
             <p class="note">Click a layer to highlight its KV and index producers and update the computation diagram below.</p>
           </div>
+          <figure class="attention-range card" aria-labelledby="attention-range-title" aria-describedby="attention-range-caption">
+            <figcaption>
+              <span class="label">Attention range / one query token t</span>
+              <h3 id="attention-range-title">Local only at L1&ndash;2; local + indexed global at L3&ndash;40</h3>
+              <p class="note">
+                Encoder layers L3&ndash;20 and decoder layers L21&ndash;40 both use sparse attention over a local window and selected global entries.
+              </p>
+            </figcaption>
+            <div class="legend" role="group" aria-label="Attention range legend">
+              <span><i style="--legend-color: var(--vision)"></i> Local window</span>
+              <span><i style="--legend-color: var(--gold)"></i> Selected global entries</span>
+              <span><i style="--legend-color: var(--line)"></i> Outside this query's attention</span>
+            </div>
+            <div class="attention-range-row" data-attention-range="local">
+              <div class="attention-range-layer"><strong>L1&ndash;2</strong><small>SWA only</small></div>
+              <div class="attention-range-history">
+                <strong class="attention-range-heading">Older history</strong>
+                <div class="attention-range-cells" aria-hidden="true">
+                  <i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i>
+                </div>
+                <small>Outside the local window</small>
+              </div>
+              <div class="attention-range-local">
+                <strong class="attention-range-heading">Local: up to 128 tokens</strong>
+                <div class="attention-range-cells" aria-hidden="true">
+                  <i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i class="query">t</i>
+                </div>
+                <small>Recent tokens, including query t</small>
+              </div>
+            </div>
+            <div class="attention-range-row" data-attention-range="local-global">
+              <div class="attention-range-layer"><strong>L3&ndash;40</strong><small>Both halves</small></div>
+              <div class="attention-range-history">
+                <strong class="attention-range-heading">Global: indexed positions</strong>
+                <div class="attention-range-cells" aria-hidden="true">
+                  <i></i><i class="selected"></i><i></i><i></i><i class="selected"></i><i></i><i></i><i></i><i class="selected"></i><i></i
+                  ><i class="selected"></i><i></i>
+                </div>
+                <small>Selected entries from global KV</small>
+              </div>
+              <div class="attention-range-local">
+                <strong class="attention-range-heading">Local: up to 128 tokens</strong>
+                <div class="attention-range-cells" aria-hidden="true">
+                  <i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i class="query">t</i>
+                </div>
+                <small>Recent tokens, including query t</small>
+              </div>
+            </div>
+            <p class="note" id="attention-range-caption">
+              <strong>Full, Reindex, and Reuse all use local + indexed global attention.</strong> Full builds global KV and selects entries; Reindex
+              refreshes selection; Reuse uses existing global KV and indices. Each layer computes fresh queries, local KV, attention weights, and
+              outputs. Blocks show schematic ranges and are not to scale.
+            </p>
+          </figure>
           <div class="reading-notes">
             <article class="reading-note" style="--accent: var(--encoder)">
               <h3>40 local caches, 4 global cache pairs</h3>
@@ -269,6 +323,97 @@
               <p>Inspect how current-layer computation connects to shared memory.</p>
             </aside>
           </div>
+          <article class="mhc-equations card" id="mhc-equations" aria-labelledby="mhc-equations-title">
+            <span class="label">Equations behind the block / Single-Pass mHC</span>
+            <h3 id="mhc-equations-title">A reads four streams; B and C update the residual</h3>
+            <p class="note">
+              The equations below show one token: X contains four D-dimensional residual streams, and x and Y are single D-dimensional vectors. All
+              stream mixing is per token. For T tokens, the stored tensor shapes are:
+            </p>
+            <div class="mhc-shapes" aria-label="mHC tensor shapes">
+              <span>X <code>[T, 4, D]</code></span
+              ><span>A <code>[T, 4]</code></span
+              ><span>B <code>[T, 4, 4]</code></span
+              ><span>C <code>[T, 4]</code></span>
+            </div>
+            <div class="mhc-equation-grid">
+              <div class="mhc-equation-part" style="--accent: var(--vision)">
+                <h4>A: four streams into one input</h4>
+                <div class="mhc-math" role="math" aria-label="x equals A previous times X">
+                  <span>x = A<sub>prev</sub> X</span>
+                </div>
+                <div class="mhc-expanded" role="math" aria-label="x equals the sum over i from zero to three of A previous i times X i">
+                  x = &sum;<sub>i=0</sub><sup>3</sup> A<sub>prev,i</sub> X<sub>i</sub>
+                </div>
+                <p><code>[4, D] &rarr; [D]</code></p>
+                <p class="note">
+                  The carried A weights the four incoming streams. Attention or MoE then computes Y = F(x), including its input RMSNorm.
+                </p>
+              </div>
+              <div class="mhc-equation-part" style="--accent: var(--residual)">
+                <h4>B: mix the old residual streams</h4>
+                <div class="mhc-math" role="math" aria-label="R equals B times X"><span>R = B X</span></div>
+                <div class="mhc-expanded" role="math" aria-label="R j equals the sum over i from zero to three of B j i times X i">
+                  R<sub>j</sub> = &sum;<sub>i=0</sub><sup>3</sup> B<sub>j,i</sub> X<sub>i</sub>
+                </div>
+                <p><code>[4, D] &rarr; [4, D]</code></p>
+                <p class="note">Each row of B specifies how the four incoming streams contribute to one updated residual stream j.</p>
+              </div>
+              <div class="mhc-equation-part" style="--accent: var(--gold)">
+                <h4>C: distribute the new output</h4>
+                <div class="mhc-math" role="math" aria-label="U equals C times Y"><span>U = C Y</span></div>
+                <div class="mhc-expanded" role="math" aria-label="U j equals C j times Y">U<sub>j</sub> = C<sub>j</sub> Y</div>
+                <p><code>[D] &rarr; [4, D]</code></p>
+                <p class="note">Each C value scales the same attention or MoE output Y before adding it to its destination stream.</p>
+              </div>
+            </div>
+            <div class="mhc-residual-equation">
+              <strong>Residual update after either sublayer</strong>
+              <div class="mhc-math" role="math" aria-label="X next equals R plus U, which equals B times X plus C times Y">
+                <span>X<sub>next</sub> = R + U</span><span>= B X + C Y</span>
+              </div>
+              <p class="note">
+                The result still has four streams. In matrix notation, A is a row vector and C is a column vector; C Y distributes the output across
+                streams. B acts on the incoming residual, and C acts on the new sublayer output.
+              </p>
+            </div>
+            <h4 class="mhc-block-title">Two coefficient sets and two residual updates per transformer layer</h4>
+            <div class="mhc-sublayer-grid">
+              <div class="mhc-sublayer" data-mhc-sublayer="attention">
+                <h4>Attention half</h4>
+                <p class="note">Predict (A<sub>attn</sub>, B<sub>attn</sub>, C<sub>attn</sub>) from X<sub>in</sub>.</p>
+                <div class="mhc-math">
+                  <span>x<sub>attn</sub> = A<sub>prev</sub> X<sub>in</sub></span>
+                </div>
+                <div class="mhc-math">
+                  <span>Y<sub>attn</sub> = Attention(x<sub>attn</sub>)</span>
+                </div>
+                <div class="mhc-math">
+                  <span>X<sub>mid</sub> =</span><span>B<sub>attn</sub> X<sub>in</sub> +</span><span>C<sub>attn</sub> Y<sub>attn</sub></span>
+                </div>
+                <p class="note">A<sub>attn</sub> is carried to this layer's FFN input.</p>
+              </div>
+              <div class="mhc-sublayer" data-mhc-sublayer="ffn">
+                <h4>MoE / FFN half</h4>
+                <p class="note">Predict (A<sub>ffn</sub>, B<sub>ffn</sub>, C<sub>ffn</sub>) from X<sub>mid</sub>.</p>
+                <div class="mhc-math">
+                  <span>x<sub>ffn</sub> = A<sub>attn</sub> X<sub>mid</sub></span>
+                </div>
+                <div class="mhc-math">
+                  <span>Y<sub>ffn</sub> = MoE(x<sub>ffn</sub>)</span>
+                </div>
+                <div class="mhc-math">
+                  <span>X<sub>out</sub> =</span><span>B<sub>ffn</sub> X<sub>mid</sub> +</span><span>C<sub>ffn</sub> Y<sub>ffn</sub></span>
+                </div>
+                <p class="note">A<sub>ffn</sub> is carried to the next layer's attention input, or the final stream merge after L40.</p>
+              </div>
+            </div>
+            <p class="note mhc-carry-note">
+              <strong>The Single-Pass shift:</strong> the current input uses A<sub>prev</sub>, already available from the preceding sublayer. Input
+              mixing can therefore share a traversal of the residual with prediction of the current A/B/C. L1 starts with A<sub>prev</sub> = [1/4,
+              1/4, 1/4, 1/4]. The two sublayers have separate learned coefficient predictors.
+            </p>
+          </article>
           <noscript
             ><p>
               The interactive diagrams need JavaScript. The architecture, cache formulas, and component descriptions below remain readable.
@@ -696,6 +841,7 @@ output = w2(hidden.to(input_dtype))</code></pre>
                 traffic relative to its original implementation; this is a residual-module saving.
               </p>
               <p>The final stream merge consumes the carried mixing coefficients too.</p>
+              <p><a href="#mhc-equations">Read the A/B/C equations beside the block diagram &rarr;</a></p>
             </article>
             <article class="extension card" id="fp4" style="--accent: var(--decoder)">
               <span class="label">Precision / cache layout</span>
