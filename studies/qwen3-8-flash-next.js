@@ -7,8 +7,10 @@
     F = c.expertWidth;
   const controls = Object.fromEntries(["layer", "lens", "storage", "tokens", "dtype"].map((key) => [key, document.getElementById(`kernel-${key}`)]));
   const diagram = document.getElementById("kernel-diagram");
+  const overview = document.getElementById("block-overview");
   const inspector = document.getElementById("kernel-inspector");
-  let selectedNode = "attn-norm";
+  let selectedNode = "attn-read";
+  let kernelView = "overview";
   let nodes = new Map();
 
   const count = (value) =>
@@ -229,7 +231,10 @@
           info: "Normalize each 128-wide value head and multiply by sigmoid of the projected gate. The 128 normalization weights are shared across heads.",
           backward: "Ungated recurrent output, RMS statistics, scales, and sigmoid gate values.",
         }),
-        gemm("gdn-output", "Output projection", ["T", D], 6144, D, { backward: "Normalized/gated output and output projection weights." }),
+        gemm("gdn-output", "Output projection", ["T", D], 6144, D, {
+          info: "Flatten the 48 normalized and sigmoid-gated value heads into 6144 channels, then project to 2560. This is the final projection of the GDN block.",
+          backward: "Normalized/gated output and output projection weights.",
+        }),
       ],
     };
   }
@@ -302,7 +307,10 @@
         op("qsa-output-gate", "Attention output x sigmoid gate", ["T", 6144], {
           backward: "Ungated attention output and the query projection's sigmoid output gate.",
         }),
-        gemm("qsa-output", "Output projection", ["T", D], 6144, D, { backward: "Gated attention output and output projection weights." }),
+        gemm("qsa-output", "Output projection", ["T", D], 6144, D, {
+          info: "Flatten the 24 sigmoid-gated query-head outputs into 6144 channels, then project to 2560. This is the final projection of the QSA block.",
+          backward: "Gated attention output and output projection weights.",
+        }),
       ],
       auxiliary: [
         op("qsa-kl", "Detached attention teacher + indexer KL", [], {
@@ -404,7 +412,9 @@
   function selectNode(id) {
     selectedNode = id;
     const item = nodes.get(id);
-    diagram.querySelectorAll("[data-node]").forEach((button) => button.setAttribute("aria-pressed", String(button.dataset.node === id)));
+    for (const container of [diagram, overview]) {
+      container.querySelectorAll("[data-node]").forEach((button) => button.setAttribute("aria-pressed", String(button.dataset.node === id)));
+    }
     const outputElements = item.dims.reduce((total, dim) => total * numericDim(dim), 1);
     const outputBytes = outputElements * (item.elementBytes ?? Number(controls.dtype.value));
     const checkpoint = controls.storage.value === "checkpoint";
@@ -419,6 +429,53 @@
         ? "Intermediates are regenerated during backward. The layer boundary input, original token IDs/document metadata, and weights must still be available."
         : "Dots indicate outputs used by later backward computations. Fusion and backend recomputation can change which tensors are retained."
     }</p><p class="note">Output bytes are a logical tensor size, not a peak-memory estimate. Attention blocks and grouped operations can process smaller chunks.</p>`;
+  }
+
+  function renderOverview(layer) {
+    const button = (id, title, dims, accent, note = "") =>
+      `<button type="button" class="overview-node" data-node="${id}" aria-pressed="${
+        id === selectedNode
+      }" style="--accent: var(--${accent})"><strong>${title}</strong><code>${dims}</code>${note ? `<small>${note}</small>` : ""}</button>`;
+    const pass = (prefix, title, operation, accent, note) =>
+      `<div class="block-pass"><div class="block-compute">${button(
+        `${prefix}-read`,
+        `Gated read for ${title}`,
+        "[T, 4, 2560] &rarr; [T, 2560]",
+        "residual"
+      )}${button(operation, title, "[T, 2560] &rarr; [T, 2560]", accent, note)}${button(
+        `${prefix}-inject`,
+        `Gated write after ${title}`,
+        "H_before + gates [T, 4, 1] &times; update [T, 1, 2560]",
+        "residual"
+      )}</div><div class="block-bypass"><strong>Carry H_before</strong><code>[T, 4, 2560]</code><span>Identity residual path</span><span>&larr; Add at the write</span></div></div>`;
+    const attention = layer.attention === "gdn" ? "Gated DeltaNet" : "Qwen Sparse Attention";
+    overview.innerHTML = `<h3>Layer ${layer.layer}: ${
+      layer.ple ? "PLE, then " : ""
+    }${attention} + MoE</h3><div class="block-boundary">Incoming four streams <code>[T, 4, 2560]</code></div>${
+      layer.ple
+        ? `<div class="block-ple">${button(
+            "ple-add",
+            "Original IDs &rarr; lexical lookup &rarr; add delta",
+            "[T, 4, 2560] + PLE [T, 4, 2560]",
+            "gold",
+            "Layer 2 only; token IDs arrive separately from H"
+          )}</div>`
+        : ""
+    }${pass(
+      "attn",
+      attention,
+      layer.attention === "gdn" ? "gdn-output" : "qsa-output",
+      layer.attention,
+      layer.attention === "gdn"
+        ? "Own layer state [48,128,128]; fixed size during decode"
+        : "Own layer K/V history; select up to 512 complete blocks + tail"
+    )}${pass(
+      "ffn",
+      "MoE",
+      "moe-sum",
+      "moe",
+      "512 choose 10 routed experts + one gated shared expert"
+    )}<div class="block-boundary">Next layer receives updated streams <code>[T, 4, 2560]</code></div>`;
   }
 
   function renderDiagram() {
@@ -440,8 +497,13 @@
     } + MoE</h3><p class="kernel-caption">Input / output [T, 10240] &middot; sublayers [T, 2560] &middot; ${count(layerWeights)} stored weights${
       layer.ple ? ", including the lexical table" : ""
     }</p>${content}`;
-    if (!nodes.has(selectedNode)) selectedNode = "attn-norm";
-    diagram.querySelectorAll("[data-node]").forEach((button) => button.addEventListener("click", () => selectNode(button.dataset.node)));
+    if (!nodes.has(selectedNode)) selectedNode = "attn-read";
+    renderOverview(layer);
+    diagram.hidden = kernelView !== "details";
+    overview.hidden = kernelView !== "overview";
+    for (const container of [diagram, overview]) {
+      container.querySelectorAll("[data-node]").forEach((button) => button.addEventListener("click", () => selectNode(button.dataset.node)));
+    }
     selectNode(selectedNode);
     document
       .querySelectorAll(".layer-tile")
@@ -476,6 +538,13 @@
   }
   controls.layer.value = "2";
   Object.values(controls).forEach((control) => control.addEventListener("change", renderDiagram));
+  document.querySelectorAll("[data-kernel-view]").forEach((button) =>
+    button.addEventListener("click", () => {
+      kernelView = button.dataset.kernelView;
+      document.querySelectorAll("[data-kernel-view]").forEach((candidate) => candidate.setAttribute("aria-pressed", String(candidate === button)));
+      renderDiagram();
+    })
+  );
   renderDiagram();
 
   const tabs = [...document.querySelectorAll("[data-tab]")];
@@ -572,28 +641,39 @@
   function renderSelection() {
     const visible = Number(document.getElementById("selection-query").value);
     const budget = Number(document.getElementById("selection-budget").value);
+    const start = document.getElementById("selection-packed").checked && visible > 32 ? 32 : 0;
     const scores = Array.from({ length: 16 }, (_, block) => 1.4 + Math.sin((block + 1) * 1.71 + visible * 0.11));
-    const selection = model.selectBlocks(visible, budget, scores);
-    const selected = new Set(selection.selected),
-      tail = new Set(selection.tail);
+    const selection = model.selectBlocks(visible - start, budget, scores);
+    const selected = new Set(selection.selected.map((index) => index + start)),
+      tail = new Set(selection.tail.map((index) => index + start));
     const grid = document.getElementById("selection-grid");
     grid.replaceChildren();
     for (let index = 0; index < 64; index++) {
       const cell = document.createElement("span");
-      const status = index >= visible ? "future" : tail.has(index) ? "tail" : selected.has(index) ? "selected" : "unselected";
+      const status =
+        index >= visible ? "future" : index < start ? "other-doc" : tail.has(index) ? "tail" : selected.has(index) ? "selected" : "unselected";
       cell.className = `token-cell ${status}`;
       cell.textContent = String(index + 1);
       cell.title = `Token ${index + 1}: ${status === "tail" ? "included partial tail" : status}`;
       grid.appendChild(cell);
     }
     document.getElementById("selection-query-label").textContent = `${visible} tokens`;
-    document.getElementById("selection-readout").textContent = `${selection.completeBlocks} complete blocks visible; selected blocks ${
+    document.getElementById("selection-readout").textContent = `Current document starts at token ${start + 1}. ${
+      selection.completeBlocks
+    } complete blocks visible; selected document-local blocks ${
       selection.blocks.length ? selection.blocks.map((block) => block + 1).join(", ") : "none"
     }. ${selection.blocks.length * 4} block tokens + ${selection.tail.length} tail tokens = ${
       selection.selected.length
-    } tokens read. Future tokens are excluded.`;
+    } tokens read. Future tokens and earlier documents are excluded.`;
+    document.getElementById("selection-scores").innerHTML = Array.from(
+      { length: selection.completeBlocks },
+      (_, block) =>
+        `<span class="${selection.blocks.includes(block) ? "chosen" : ""}">Block ${block + 1}: tokens ${start + block * 4 + 1}&ndash;${
+          start + block * 4 + 4
+        }, score ${scores[block].toFixed(2)}</span>`
+    ).join("");
   }
-  ["selection-query", "selection-budget"].forEach((id) => document.getElementById(id).addEventListener("input", renderSelection));
+  ["selection-query", "selection-budget", "selection-packed"].forEach((id) => document.getElementById(id).addEventListener("input", renderSelection));
   renderSelection();
 
   const root = document.documentElement;

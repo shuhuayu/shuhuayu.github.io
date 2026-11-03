@@ -8,24 +8,27 @@
       content="An interactive, infrastructure-oriented guide to Qwen3.8-Flash-Next: Gated DeltaNet, Qwen Sparse Attention, four gated residual streams, lexical embeddings, MoE, audited checkpoint counts, and cache scaling."
     />
     <meta name="robots" content="noindex, follow" />
-    <meta property="og:title" content="An infra-oriented diagram of Qwen3.8-Flash-Next" />
+    <meta property="og:title" content="Qwen3.8-Flash-Next, one token at a time" />
     <meta
       property="og:description"
-      content="Follow the kernels, residual streams, sparse attention blocks, and 180B-weight checkpoint of Qwen3.8-Flash-Next."
+      content="A step-by-step walkthrough of Qwen3.8-Flash-Next, from token inputs and four residual streams to recurrent state, sparse attention, lexical lookups, and distributed training."
     />
     <meta property="og:type" content="article" />
     <link rel="canonical" href="https://shuhuayu.github.io/studies/qwen3-8-flash-next.html" />
-    <link rel="stylesheet" href="./qwen3-8-flash-next.css" />
-    <script src="./qwen3-8-flash-next-model.js" defer></script>
-    <script src="./qwen3-8-flash-next.js" defer></script>
-    <title>An infra-oriented diagram of Qwen3.8-Flash-Next</title>
+    <link rel="stylesheet" href="./qwen3-8-flash-next.css?v=20261103" />
+    <script src="./qwen3-8-flash-next-model.js?v=20261103" defer></script>
+    <script src="./qwen3-8-flash-next.js?v=20261103" defer></script>
+    <script src="./qwen3-8-flash-next-walkthrough.js?v=20261103" defer></script>
+    <title>Qwen3.8-Flash-Next, one token at a time</title>
   </head>
   <body>
+    <a class="skip-link" href="#main">Skip to the study</a>
     <div class="page">
       <nav class="topline" aria-label="Architecture studies">
         <a href="../">Shuhua Yu</a>
         <span class="current" aria-current="page">Qwen3.8-Flash-Next / Architecture</span>
-        <a href="./kimi-k3.html">Kimi K3 study</a>
+        <a href="./deepseek-v4-1-flash.html">DeepSeek V4.1 Flash</a>
+        <a href="./kimi-k3.html">Kimi K3</a>
         <div class="actions">
           <button class="small-button" id="theme-toggle" type="button" aria-label="Switch to dark theme">Dark</button>
           <button class="small-button" id="print-page" type="button">Print</button>
@@ -34,22 +37,30 @@
 
       <header class="hero">
         <div class="eyebrow">Sequence &middot; depth &middot; lexical memory</div>
-        <h1>An infra-oriented diagram of Qwen3.8-Flash-Next</h1>
+        <h1>Qwen3.8-Flash-Next,<br />one token at a time</h1>
         <p class="dek">
-          A hybrid MoE decoder with three ways to spend capacity: recurrent states carry history, sparse attention retrieves selected blocks, and four
-          gated residual streams carry information through depth. A 51-billion-parameter lexical table adds memory through lookups.
+          Follow a token from its embedding through four residual streams, recurrent history, sparse attention, and learned phrase memory. Then name
+          the owner, lifetime, and gradient of each tensor. This is a walkthrough for people building training infrastructure.
         </p>
         <p class="disclosure">
           Based on the <a href="https://huggingface.co/Qwen/Qwen3.8-Flash-Next">official model card</a>, technical report, released configuration, and
-          a shape audit of all 131 checkpoint shards. Shapes are logical shapes before GPUs divide the work. Reference checked October 28, 2026.
+          a shape audit of all 131 checkpoint shards. Shapes are logical, before parallelism. This page numbers layers 1&ndash;48; code uses indices
+          0&ndash;47. The source snapshot is pinned to October 28, 2026; this walkthrough was revised November 2, 2026.
         </p>
         <nav class="study-links" aria-label="Jump to a section">
+          <a href="#motivation">Start here</a>
+          <a href="#inputs">Inputs</a>
           <a href="#anatomy">Model overview</a>
-          <a href="#computation">Computation diagram</a>
-          <a href="#components">Architecture components</a>
-          <a href="#selection">Sparse selection</a>
+          <a href="#residual">Four streams</a>
+          <a href="#computation">One block</a>
+          <a href="#gdn">GDN state</a>
+          <a href="#selection">QSA</a>
+          <a href="#lexical">PLE lookup</a>
+          <a href="#experts">Experts</a>
+          <a href="#training">Training &amp; ownership</a>
           <a href="#parameters">Parameter counts</a>
           <a href="#cache">Cache scaling</a>
+          <a href="#sources">Sources</a>
         </nav>
         <div class="stats" aria-label="Released model specifications">
           <div class="stat"><strong>125B / 6B</strong><span>published backbone / active labels</span></div>
@@ -61,8 +72,160 @@
         </div>
       </header>
 
-      <main>
+      <main id="main" tabindex="-1">
+        <section id="motivation">
+          <div class="eyebrow">01 / Start with the costs</div>
+          <h2>Three budgets explain the design</h2>
+          <p class="section-lede">
+            Start with a causal Transformer: one hidden vector per token, attention that reads history, and a feed-forward network in every layer.
+            Qwen spends more capacity in some places and less work in others. Track each budget before discussing kernels or parallelism.
+          </p>
+          <div class="budget-grid">
+            <article class="budget-card card" style="--accent: var(--gdn)">
+              <span class="budget-number">1 / Sequence</span>
+              <h3>Carry history, or retrieve it</h3>
+              <div class="budget-symbol">36 GDN + 12 QSA</div>
+              <p>
+                GDN carries fixed-size state during decode. QSA retains full-resolution K/V but reads selected blocks. The indexer still searches a
+                growing history.
+              </p>
+              <a href="#gdn">Follow the state and the search &rarr;</a>
+            </article>
+            <article class="budget-card card" style="--accent: var(--residual)">
+              <span class="budget-number">2 / Depth</span>
+              <h3>Carry four streams between sublayers</h3>
+              <div class="budget-symbol">4D carried &middot; D computed</div>
+              <p>
+                The residual path is 10,240 channels wide. Attention and MoE each receive 2560 channels. Learned gates decide what to read and where
+                to write.
+              </p>
+              <a href="#residual">Work through a read and a write &rarr;</a>
+            </article>
+            <article class="budget-card card" style="--accent: var(--gold)">
+              <span class="budget-number">3 / Parameters</span>
+              <h3>Store many weights, access a subset</h3>
+              <div class="budget-symbol">10 experts &middot; 16 rows</div>
+              <p>
+                Each token selects ten routed experts per layer and sixteen lexical rows at layer 2. All expert and table weights still need storage
+                and an optimizer policy.
+              </p>
+              <a href="#lexical">See which rows a token reads &rarr;</a>
+            </article>
+          </div>
+          <div class="walkthrough card">
+            <div>
+              <span class="label">Suggested PyTorch team walkthrough / about 35 minutes</span>
+              <h3>Follow computation, then account for ownership</h3>
+            </div>
+            <ol class="walkthrough-list">
+              <li><a href="#inputs">Inputs and the 48-layer map</a><span>4 min</span></li>
+              <li><a href="#residual">Four streams: normalize, read, write</a><span>6 min</span></li>
+              <li><a href="#gdn">A recurrent update in numbers</a><span>4 min</span></li>
+              <li><a href="#selection">Pool, score, select, read</a><span>5 min</span></li>
+              <li><a href="#lexical">Build the lexical features from token IDs</a><span>6 min</span></li>
+              <li><a href="#experts">Route tokens to experts</a><span>3 min</span></li>
+              <li><a href="#training">Parallelism, gradients, and evidence</a><span>7 min</span></li>
+            </ol>
+          </div>
+          <p class="note">
+            T denotes current packed tokens; N denotes retained prefix tokens; D = 2560. Serving state, training activations, model weights, and
+            optimizer state have different lifetimes.
+          </p>
+        </section>
+
+        <section id="inputs">
+          <div class="eyebrow">02 / Before layer 1</div>
+          <h2>Token IDs become vectors, then four streams</h2>
+          <p class="section-lede">
+            The vocabulary table has 248,320 rows and 2560 columns. Each input ID selects one row. Images and video arrive as visual placeholder
+            tokens plus pixel inputs; the vision encoder supplies vectors for those positions before the decoder starts.
+          </p>
+          <div class="input-demo card">
+            <div class="controls">
+              <label
+                >Input example<select id="input-mode">
+                  <option value="text">Text only</option>
+                  <option value="image" selected>Text + one image</option>
+                  <option value="video">Text + video</option>
+                </select></label
+              >
+              <label
+                >Nonvisual tokens<select id="input-text-tokens">
+                  <option value="32" selected>32</option>
+                  <option value="4096">4,096</option>
+                </select></label
+              >
+              <label id="input-resolution-control"
+                >Processed square resolution<select id="input-resolution">
+                  <option value="224">224 &times; 224</option>
+                  <option value="448" selected>448 &times; 448</option>
+                  <option value="896">896 &times; 896</option>
+                </select></label
+              >
+              <label id="input-frames-control" hidden
+                >Sampled frames<select id="input-frames">
+                  <option value="2">2</option>
+                  <option value="4" selected>4</option>
+                  <option value="8">8</option>
+                </select></label
+              >
+            </div>
+            <div class="input-token-strip" id="input-token-strip" aria-live="polite"></div>
+            <ol class="tensor-path input-path">
+              <li>
+                <span class="step-number">1</span><strong>Original IDs</strong><code id="input-id-shape">[228]</code>
+                <p>Integers name vocabulary rows. Keep these IDs for PLE at layer 2.</p>
+              </li>
+              <li>
+                <span class="step-number">2</span><strong>Token embedding</strong><code id="input-embedding-shape">[228, 2560]</code>
+                <p>Look up vectors, including initial vectors for visual placeholders.</p>
+              </li>
+              <li>
+                <span class="step-number">3</span><strong>Fill visual positions</strong><code id="input-vision-shape">[196, 2560]</code>
+                <p id="input-vision-description">The merger's outputs replace the embeddings at the matching visual positions.</p>
+              </li>
+              <li>
+                <span class="step-number">4</span><strong>Copy into four streams</strong><code id="input-stream-shape">[228, 4, 2560]</code>
+                <p>Copy each token vector four times once, before the first decoder layer.</p>
+              </li>
+            </ol>
+            <div class="visual-path" id="visual-path">
+              <div>
+                <strong>Patch embedding</strong><span>16 &times; 16 pixels &middot; temporal patch 2</span
+                ><code id="input-patch-shape">[784, 1152]</code>
+              </div>
+              <span aria-hidden="true">&rarr;</span>
+              <div><strong>27 vision blocks</strong><span>16 heads &middot; width 1152</span><code id="input-encoder-shape">[784, 1152]</code></div>
+              <span aria-hidden="true">&rarr;</span>
+              <div>
+                <strong>2 &times; 2 merge + MLP</strong><span>Four spatial patch vectors per output</span
+                ><code id="input-merge-shape">[196, 2560]</code>
+              </div>
+            </div>
+            <p class="note" id="input-accounting" aria-live="polite"></p>
+            <p class="note">
+              Counts describe the processed grid. Real preprocessing resizes images and samples or pads frames. A still image uses the temporal patch
+              machinery with repeated image frames. Here the nonvisual count includes all nonvisual special tokens. No deepstack visual injections are
+              configured in this release.
+            </p>
+          </div>
+          <div class="reading-notes">
+            <article class="reading-note" style="--accent: var(--vision)">
+              <h3>Positions and IDs serve different consumers</h3>
+              <p>
+                Multimodal rotary coordinates locate text and visual positions for attention. Original token IDs and document positions supply lexical
+                history and packed boundaries.
+              </p>
+            </article>
+            <article class="reading-note" style="--accent: var(--residual)">
+              <h3>Later layers receive existing streams</h3>
+              <p>Layer 2 takes layer 1's four updated streams. The initial four-way copy is not repeated at every layer.</p>
+            </article>
+          </div>
+        </section>
+
         <section id="anatomy">
+          <div class="eyebrow">03 / The layer map</div>
           <h2>The model at a glance</h2>
           <p class="section-lede">
             Forty-eight decoder layers repeat a four-layer rhythm twelve times: GDN, GDN, GDN, QSA. Every layer has 512 routed experts and one shared
@@ -131,11 +294,81 @@
           </div>
         </section>
 
-        <section id="computation">
-          <h2>Follow the kernels, one layer at a time</h2>
+        <section id="residual">
+          <div class="eyebrow">04 / Work through the residual path</div>
+          <h2>Read four streams, compute once, write four updates</h2>
           <p class="section-lede">
-            Choose a layer and click an operation to inspect its tensor shape, weight count, and backward dependencies. Thick borders mark matrix
-            multiplies or attention kernels.
+            Each attention or MoE sublayer begins with H [T, 4, 2560]. It produces a single input [T, 2560], computes its update, then adds a scaled
+            copy of that update to every stream. The read and write gates are predicted from the current hidden state.
+          </p>
+          <div class="stepped-demo card" style="--accent: var(--residual)">
+            <div class="demo-heading">
+              <div>
+                <span class="label">Worked example / one token, four streams, two channels</span>
+                <h3>Keep the shape changes visible</h3>
+              </div>
+              <span class="demo-tag">Illustrative weights and values</span>
+            </div>
+            <div class="controls">
+              <label
+                >Incoming state<select id="gr-entry">
+                  <option value="later" selected>Later layer: streams differ</option>
+                  <option value="first">First layer: four copies</option>
+                </select></label
+              >
+              <label class="grow" for="gr-write-bias"
+                >Add to the toy write logits: <output id="gr-bias-label">0.0</output
+                ><input id="gr-write-bias" type="range" min="-12" max="12" step="0.5" value="0"
+              /></label>
+            </div>
+            <div class="step-nav" role="group" aria-label="Gated residual walkthrough">
+              <button type="button" data-gr-step="0" aria-pressed="true">1 Carry</button
+              ><button type="button" data-gr-step="1" aria-pressed="false">2 Normalize</button
+              ><button type="button" data-gr-step="2" aria-pressed="false">3 Predict gates</button
+              ><button type="button" data-gr-step="3" aria-pressed="false">4 Read</button
+              ><button type="button" data-gr-step="4" aria-pressed="false">5 Compute</button
+              ><button type="button" data-gr-step="5" aria-pressed="false">6 Write</button>
+            </div>
+            <div class="step-content" id="gr-content" aria-live="polite"></div>
+            <div class="step-footer">
+              <button class="small-button" type="button" id="gr-prev" disabled>Previous</button><span id="gr-progress">Step 1 of 6</span
+              ><button class="small-button" type="button" id="gr-next">Next step &rarr;</button>
+            </div>
+            <p class="note">
+              The example uses D = 2 and rank 2 so every value fits on screen. The production shapes shown beside it use D = 2560 and rank 320. The
+              fixed sublayer update [0.8, -0.4] stands in for attention or MoE; it is not computed by those kernels here. The slider adds a teaching
+              offset, not a bias parameter in the release.
+            </p>
+          </div>
+          <div class="reading-notes">
+            <article class="reading-note" style="--accent: var(--residual)">
+              <h3>Read: one gate per stream and channel</h3>
+              <p>
+                The read gates are [T, 4, 2560]. Multiply them by the independently normalized streams, then average across the four streams. Sigmoid
+                gates do not have a fixed sum across streams.
+              </p>
+            </article>
+            <article class="reading-note" style="--accent: var(--residual)">
+              <h3>Write: one scalar per stream</h3>
+              <p>
+                The write projection maps [T, 10240] to [T, 4]. Gates are 2 &times; sigmoid(logits / 4): a zero logit gives 1, and the range is 0 to
+                2. Broadcast each scalar over all 2560 channels of the sublayer output.
+              </p>
+            </article>
+          </div>
+          <p class="source-note">
+            Attention and MoE have separate mixers. After layer 48, a final read-only mixer produces [T, 2560] for the LM head. Its grouped
+            normalization is part of the mixer; the reference has no separate final RMSNorm.
+            <a href="#source-transformers">Reference implementation</a>.
+          </p>
+        </section>
+
+        <section id="computation">
+          <div class="eyebrow">05 / Follow one complete block</div>
+          <h2>The four-stream state connects every operation</h2>
+          <p class="section-lede">
+            Start with the overview, then expand to tensor and kernel details. Select an operation to inspect its weights, logical output size, and
+            backward dependencies. Layer 2 includes PLE; every fourth layer uses QSA.
           </p>
           <div class="controls card">
             <label for="kernel-layer">Decoder layer<select id="kernel-layer" aria-label="Decoder layer"></select></label>
@@ -166,6 +399,10 @@
               </select></label
             >
           </div>
+          <div class="view-switch" role="group" aria-label="Computation diagram detail">
+            <button type="button" data-kernel-view="overview" aria-pressed="true">Overview</button
+            ><button type="button" data-kernel-view="details" aria-pressed="false">Tensor &amp; kernel details</button>
+          </div>
           <div class="legend">
             <span><i class="key gemm"></i>GEMM / attention</span><span><i class="key op"></i>Norm / elementwise / layout</span
             ><span><i class="key comm"></i>Expert dispatch / combine</span><span><i class="key save"></i>Backward uses this output</span>
@@ -175,7 +412,8 @@
             measured GPU schedule. Shapes can describe logical tensors processed in chunks.
           </p>
           <div class="kernel-layout">
-            <div class="kernel-diagram card" id="kernel-diagram"></div>
+            <div class="block-overview card" id="block-overview"></div>
+            <div class="kernel-diagram card" id="kernel-diagram" hidden></div>
             <aside class="kernel-inspector card" id="kernel-inspector" aria-live="polite"></aside>
           </div>
           <p class="note" id="kernel-memory-note"></p>
@@ -186,390 +424,102 @@
           >
         </section>
 
-        <section id="components">
-          <h2>One decoder, six views</h2>
+        <section id="gdn">
+          <div class="eyebrow">06 / The recurrent layers</div>
+          <h2>GDN updates a small matrix of history</h2>
           <p class="section-lede">
-            The three main additions are QSA, gated residuals, and lexical embeddings. GDN, routed experts, and the vision pathway remain the
-            foundation of the hybrid decoder. <sup><a href="#source-card">[1]</a></sup>
+            A key addresses the state, a value supplies new content, and a query reads the updated state. The delta rule first predicts the value
+            already stored under the key, then writes a gated correction. Each of the 36 GDN layers has its own state.
           </p>
-          <div class="tabs" role="tablist" aria-label="Architecture component">
-            <button class="tab" id="tab-gdn" role="tab" aria-selected="true" aria-controls="panel-gdn" data-tab="gdn" type="button">
-              Gated DeltaNet
-            </button>
-            <button class="tab" id="tab-qsa" role="tab" aria-selected="false" aria-controls="panel-qsa" data-tab="qsa" type="button" tabindex="-1">
-              QSA
-            </button>
-            <button class="tab" id="tab-gr" role="tab" aria-selected="false" aria-controls="panel-gr" data-tab="gr" type="button" tabindex="-1">
-              Gated residual
-            </button>
-            <button class="tab" id="tab-ple" role="tab" aria-selected="false" aria-controls="panel-ple" data-tab="ple" type="button" tabindex="-1">
-              Lexical embeddings
-            </button>
-            <button class="tab" id="tab-moe" role="tab" aria-selected="false" aria-controls="panel-moe" data-tab="moe" type="button" tabindex="-1">
-              MoE
-            </button>
-            <button
-              class="tab"
-              id="tab-vision"
-              role="tab"
-              aria-selected="false"
-              aria-controls="panel-vision"
-              data-tab="vision"
-              type="button"
-              tabindex="-1"
-            >
-              Vision
-            </button>
+          <div class="stepped-demo card" style="--accent: var(--gdn)">
+            <div class="demo-heading">
+              <div>
+                <span class="label">One illustrative head / key width 2, value width 2</span>
+                <h3>Forget, predict, correct, read</h3>
+              </div>
+              <span class="demo-tag">Release: 48 states of [128, 128] per layer</span>
+            </div>
+            <div class="controls">
+              <label class="grow" for="gdn-decay"
+                >Decay &alpha;: <output id="gdn-decay-label">0.90</output><input id="gdn-decay" type="range" min="0" max="100" value="90"
+              /></label>
+              <label class="grow" for="gdn-beta"
+                >Write strength &beta;: <output id="gdn-beta-label">0.50</output><input id="gdn-beta" type="range" min="0" max="100" value="50"
+              /></label>
+              <label
+                >Query direction<select id="gdn-query">
+                  <option value="match">Read along the current key</option>
+                  <option value="other">Read the other state row</option>
+                  <option value="mixed">Read a mixture</option>
+                </select></label
+              >
+            </div>
+            <div class="state-inputs" id="gdn-inputs"></div>
+            <div class="step-nav" role="group" aria-label="Delta-rule walkthrough">
+              <button type="button" data-gdn-step="0" aria-pressed="true">1 Decay</button
+              ><button type="button" data-gdn-step="1" aria-pressed="false">2 Predict</button
+              ><button type="button" data-gdn-step="2" aria-pressed="false">3 Correct</button
+              ><button type="button" data-gdn-step="3" aria-pressed="false">4 Read</button>
+            </div>
+            <div id="gdn-content" class="step-content" aria-live="polite"></div>
+            <div class="formula">
+              S_decayed = &alpha; &times; S_previous<br />prediction = k<sup>T</sup> S_decayed<br />S_new = S_decayed + &beta; k (v - prediction)<sup
+                >T</sup
+              ><br />output = q<sup>T</sup> S_new
+            </div>
+            <p class="note">
+              S has key channels as rows and value channels as columns. Q/K are normalized in the actual model. Decay comes from learned projections
+              and a softplus/exponential transform; &beta; comes from sigmoid. The controls directly choose the resulting gate values.
+            </p>
           </div>
-          <div class="card">
-            <article class="component-panel" id="panel-gdn" role="tabpanel" aria-labelledby="tab-gdn" data-panel="gdn" style="--accent: var(--gdn)">
-              <div class="component-intro">
-                <div>
-                  <h3>Gated DeltaNet: history in a fixed-size state</h3>
-                  <p>
-                    GDN is a gated delta-rule recurrence. Short causal convolutions prepare Q/K/V; a decay gate forgets old state, and a beta gate
-                    controls a corrective write. Chunked training computes this recurrence in parallel; token-by-token decoding carries the state
-                    forward.
-                  </p>
-                  <p>
-                    Sixteen Q/K heads feed forty-eight value heads, so each Q/K head serves three value heads. The output uses per-head RMS
-                    normalization and a <strong>sigmoid</strong> gate in this release. <sup><a href="#source-transformers">[4]</a></sup>
-                  </p>
-                </div>
-                <aside class="spec-box">
-                  <strong>36 layers</strong>
-                  <dl>
-                    <dt>Q/K</dt>
-                    <dd>16 &times; 128</dd>
-                    <dt>V / output gate</dt>
-                    <dd>48 &times; 128</dd>
-                    <dt>QKV convolution</dt>
-                    <dd>10,240 channels &times; width 4</dd>
-                    <dt>Recurrent state / layer</dt>
-                    <dd>[48, 128, 128]</dd>
-                  </dl>
-                </aside>
-              </div>
-              <div class="path">
-                <span>x [T, 2560]</span><span>Q/K/V + causal conv</span><span>Q/K L2 norm</span><span>Gated delta rule</span
-                ><span>RMSNorm &times; sigmoid gate</span><span>Output &rarr; 2560</span>
-              </div>
-              <div class="formula">
-                S&#771;<sub>t</sub> = &alpha;<sub>t</sub> S<sub>t-1</sub><br />S<sub>t</sub> = S&#771;<sub>t</sub> + &beta;<sub>t</sub> k<sub>t</sub>
-                (v<sub>t</sub> - S&#771;<sub>t</sub><sup>T</sup> k<sub>t</sub>)<sup>T</sup><br />o<sub>t</sub> = S<sub>t</sub><sup>T</sup> q<sub
-                  >t</sub
-                >
-              </div>
-              <div class="detail-grid">
-                <div>
-                  <h4>Persistent state</h4>
-                  <p>
-                    The thirty-six recurrent matrices occupy 108 MiB at FP32 per sequence, independent of context length. Short-convolution history
-                    adds a small fixed term.
-                  </p>
-                </div>
-                <div>
-                  <h4>Compute and normalization</h4>
-                  <p>
-                    The main projections produce QKV width 10,240 and gate width 6,144. The beta and decay projections each produce 48 scalars per
-                    token. State accumulation and normalization use higher precision than BF16 activations.
-                  </p>
-                </div>
-              </div>
+          <div class="reading-notes">
+            <article class="reading-note" style="--accent: var(--gdn)">
+              <h3>Decode carries bounded state</h3>
+              <p>
+                Each layer carries [48, 128, 128] state plus short convolution history for each active sequence. Across 36 layers, the matrices occupy
+                108 MiB at FP32, regardless of prefix length.
+              </p>
             </article>
-
-            <article class="component-panel" id="panel-qsa" role="tabpanel" aria-labelledby="tab-qsa" data-panel="qsa" style="--accent: var(--qsa)">
-              <div class="component-intro">
-                <div>
-                  <h3>Qwen Sparse Attention: select blocks, then read tokens</h3>
-                  <p>
-                    A small multi-query indexer predicts relevance for complete four-token blocks. It averages raw keys inside each block, then
-                    normalizes and applies positional encoding using the first token's position. Four query heads score each block; their rectified
-                    scores are summed.
-                  </p>
-                  <p>
-                    Top-k chooses up to 512 blocks. Main GQA uses the <strong>original, unpooled K/V</strong> of the selected 2048 tokens, plus up to
-                    three tokens in the current incomplete block. Causality and document boundaries apply to both selection and attention.
-                    <sup><a href="#source-report">[3]</a></sup>
-                  </p>
-                </div>
-                <aside class="spec-box">
-                  <strong>12 layers</strong>
-                  <dl>
-                    <dt>Main Q / KV heads</dt>
-                    <dd>24 / 2, width 256</dd>
-                    <dt>Main rotary channels</dt>
-                    <dd>64 of 256</dd>
-                    <dt>Indexer Q / K heads</dt>
-                    <dd>4 / 1, width 128</dd>
-                    <dt>Budget</dt>
-                    <dd>512 blocks + partial tail</dd>
-                  </dl>
-                </aside>
-              </div>
-              <div class="path">
-                <span>Indexer Q / raw K</span><span>Average 4 raw keys</span><span>Norm + RoPE</span><span>Top 512 blocks</span
-                ><span>Expand to token IDs</span><span>Selected-token GQA</span>
-              </div>
-              <div class="formula">
-                k&#772;<sub>b</sub> = RoPE(RMSNorm(mean(raw_k[4b : 4b+4])), position[4b])<br />score(q, b) = &Sigma;<sub>h=1..4</sub> ReLU(q<sub
-                  >h</sub
-                >
-                &middot; k&#772;<sub>b</sub>) / &radic;128<br />selected = tokens(top_512_complete_blocks) &cup; incomplete_tail
-              </div>
-              <div class="detail-grid">
-                <div>
-                  <h4>Two training stages</h4>
-                  <p>
-                    The report introduces QSA during continued pretraining: first distill a dense-attention teacher into the indexer, then jointly
-                    train the backbone and indexer with sparse attention and a selected-block KL objective.
-                  </p>
-                </div>
-                <div>
-                  <h4>Two different costs</h4>
-                  <p>
-                    The sparse attention core reads a bounded token budget. The indexer still scores the growing set of compressed blocks;
-                    whole-sequence prefill indexing remains quadratic in sequence length, reduced by the factor-four compression.
-                  </p>
-                </div>
-              </div>
-            </article>
-
-            <article class="component-panel" id="panel-gr" role="tabpanel" aria-labelledby="tab-gr" data-panel="gr" style="--accent: var(--residual)">
-              <div class="component-intro">
-                <div>
-                  <h3>Gated residual: four streams, one sublayer input</h3>
-                  <p>
-                    The persistent residual is [T, 4, 2560], or [T, 10240] when flattened. Each stream is normalized independently. A 10,240 &rarr;
-                    320 &rarr; 10,240 bottleneck predicts an element-wise sigmoid read gate. Averaging the gated streams produces a width-2560 input
-                    for the sublayer.
-                  </p>
-                  <p>
-                    Four scalar write gates send the sublayer's output back into the four streams. Attention and MoE have independent read/write
-                    modules. A final read-only mixer reduces the streams before the LM head; the reference has no separate final RMSNorm.
-                    <sup><a href="#source-transformers">[4]</a></sup>
-                  </p>
-                </div>
-                <aside class="spec-box">
-                  <strong>96 read/write modules + final read</strong>
-                  <dl>
-                    <dt>Residual channels</dt>
-                    <dd>4 &times; 2560 = 10,240</dd>
-                    <dt>Read bottleneck</dt>
-                    <dd>Rank 320</dd>
-                    <dt>Read gate</dt>
-                    <dd>One value / stream / channel</dd>
-                    <dt>Write gate</dt>
-                    <dd>One scalar / stream</dd>
-                  </dl>
-                </aside>
-              </div>
-              <div class="path">
-                <span>4 residual streams</span><span>Grouped RMSNorm</span><span>Low-rank read gates</span><span>Mean gated read &rarr; D</span
-                ><span>Sublayer F(x)</span><span>4 scalar writes</span>
-              </div>
-              <div class="formula">
-                R&#770;<sub>i</sub> = GroupRMSNorm(R<sub>i</sub>)<br />G = &sigma;(W<sub>up</sub> SiLU(W<sub>down</sub> vec(R&#770;) / 4))<br />x =
-                mean<sub>i</sub>(G<sub>i</sub> &odot; R&#770;<sub>i</sub>), s = 2&sigma;(W<sub>write</sub> vec(R&#770;) / 4)<br />R&prime;<sub>i</sub>
-                = R<sub>i</sub> + s<sub>i</sub> F(x)
-              </div>
-              <div class="detail-grid">
-                <div>
-                  <h4>Width in the residual path</h4>
-                  <p>
-                    Attention and expert projections operate at D = 2560. The wider residual path increases activation traffic and gives the model
-                    different learned reads of accumulated information.
-                  </p>
-                </div>
-                <div>
-                  <h4>Compared with Kimi's Attention Residuals</h4>
-                  <p>
-                    Kimi K3 retrieves earlier depth summaries using attention. GR keeps four streams and learns channel-wise read gates plus scalar
-                    writes. Its design omits an additional stream-to-stream residual mixing matrix.
-                  </p>
-                </div>
-              </div>
-            </article>
-
-            <article class="component-panel" id="panel-ple" role="tabpanel" aria-labelledby="tab-ple" data-panel="ple" style="--accent: var(--gold)">
-              <div class="component-intro">
-                <div>
-                  <h3>Lexical embeddings: a large table with a small read</h3>
-                  <p>
-                    Eight bigram and eight trigram hash heads each address a distinct prime-sized vocabulary near twenty million slots. Their tables
-                    are concatenated into 320,001,536 padded rows, each with 160 features. Sixteen lookups concatenate to [T, 2560].
-                  </p>
-                  <p>
-                    The lexical features project to one shared value and four stream-specific keys. Normalized residual streams gate the value. A
-                    width-four causal convolution with dilation three adds local lexical context. The result is added before layer 2's attention read.
-                    <sup><a href="#source-config">[2]</a></sup>
-                  </p>
-                </div>
-                <aside class="spec-box">
-                  <strong>One lexical layer: layer 2</strong>
-                  <dl>
-                    <dt>Hash heads</dt>
-                    <dd>8 bigram + 8 trigram</dd>
-                    <dt>Table</dt>
-                    <dd>320,001,536 &times; 160</dd>
-                    <dt>Checkpoint storage</dt>
-                    <dd>128 row chunks</dd>
-                    <dt>Lookup / token</dt>
-                    <dd>16 &times; 160 features</dd>
-                  </dl>
-                </aside>
-              </div>
-              <div class="path">
-                <span>Original token IDs</span><span>Document-local n-gram hashes</span><span>16 sparse lookups</span
-                ><span>Key / value projections</span><span>Stream gates + causal conv</span><span>Add [T, 10240]</span>
-              </div>
-              <div class="formula">
-                e<sub>t</sub> = concat(lookup<sub>h</sub>(hash<sub>h</sub>(token history))) &isin; R<sup>2560</sup><br />gate<sub>i</sub> =
-                &sigma;(sign(a<sub>i</sub>) &radic;max(|a<sub>i</sub>|, 10<sup>-6</sup>)), a<sub>i</sub> = norm(key<sub>i</sub>) &middot;
-                norm(R<sub>i</sub>) / &radic;2560<br />u<sub>i</sub> = gate<sub>i</sub> value; PLE<sub>i</sub> = u<sub>i</sub> +
-                SiLU(causal_conv(norm(u<sub>i</sub>)))
-              </div>
-              <div class="detail-grid">
-                <div>
-                  <h4>Weight capacity and bandwidth</h4>
-                  <p>
-                    The BF16 table alone is 95.37 GiB. Each token reads 5 KiB of lexical features before projections. The report places PLE at layer 2
-                    so predictable lookups can be prefetched from host memory while layer 1 runs.
-                  </p>
-                </div>
-                <div>
-                  <h4>Token metadata must survive</h4>
-                  <p>
-                    Hashing requires original IDs and resets history at EOS. Packed training also needs document boundaries, including when PLE lives
-                    on a later pipeline stage. Multimodal rotary coordinates do not replace that lexical history.
-                  </p>
-                </div>
-              </div>
-            </article>
-
-            <article class="component-panel" id="panel-moe" role="tabpanel" aria-labelledby="tab-moe" data-panel="moe" style="--accent: var(--moe)">
-              <div class="component-intro">
-                <div>
-                  <h3>MoE: 512 experts behind a width-640 intermediate</h3>
-                  <p>
-                    Every layer routes each token to ten of 512 SwiGLU experts and also evaluates one shared expert. Each expert has gate, up, and
-                    down matrices at widths 2560 and 640. Selected router probabilities are normalized; the shared expert has its own sigmoid output
-                    gate.
-                  </p>
-                  <p>
-                    Routing uses FP32 softmax on activation-rounded logits, then casts expert mixing weights to the activation dtype. Small BF16
-                    rounding differences near a tie can change the discrete expert IDs. <sup><a href="#source-transformers">[4]</a></sup>
-                  </p>
-                </div>
-                <aside class="spec-box">
-                  <strong>48 expert banks</strong>
-                  <dl>
-                    <dt>Routed selection</dt>
-                    <dd>512 choose 10</dd>
-                    <dt>Shared experts</dt>
-                    <dd>1 &times; gated SwiGLU</dd>
-                    <dt>Per expert</dt>
-                    <dd>3 &times; 2560 &times; 640 = 4.9152M</dd>
-                    <dt>Global assignments</dt>
-                    <dd>R = 10T</dd>
-                  </dl>
-                </aside>
-              </div>
-              <div class="path">
-                <span>Router [T, 512]</span><span>Top 10 + normalize</span><span>Dispatch R tokens</span><span>Grouped expert GEMMs</span
-                ><span>Weighted combine</span><span>+ gated shared expert</span>
-              </div>
-              <div class="formula">
-                expert(x) = W<sub>down</sub>(SiLU(W<sub>gate</sub>x) &odot; W<sub>up</sub>x)<br />MoE(x) = &Sigma;<sub>e &isin; top10</sub> p<sub
-                  >e</sub
-                >
-                expert<sub>e</sub>(x) + &sigma;(w<sub>shared</sub>x) shared(x)<br />routed bank = 48 &times; 512 &times; 3 &times; 2560 &times; 640 =
-                120.796B weights
-              </div>
-              <div class="detail-grid">
-                <div>
-                  <h4>Storage versus selected matrices</h4>
-                  <p>
-                    The routed bank holds 120.796B weights. Ten experts per token select 2.359B of those weights across all layers. Routers,
-                    attention, residual mixers, and the LM head add to the token's active path.
-                  </p>
-                </div>
-                <div>
-                  <h4>Expert parallelism</h4>
-                  <p>
-                    Dispatch and combine exchange token activations across expert owners. R is a logical group-wide assignment count; expert imbalance
-                    and placement determine how many assignments each GPU receives.
-                  </p>
-                </div>
-              </div>
-            </article>
-
-            <article
-              class="component-panel"
-              id="panel-vision"
-              role="tabpanel"
-              aria-labelledby="tab-vision"
-              data-panel="vision"
-              style="--accent: var(--vision)"
-            >
-              <div class="component-intro">
-                <div>
-                  <h3>Vision: patch tokens enter the same decoder</h3>
-                  <p>
-                    A twenty-seven-layer vision transformer uses width 1152, sixteen heads, and intermediate width 4304. A spatiotemporal patch
-                    embedding consumes [3, 2, 16, 16] patches for images and video. A 2 &times; 2 spatial merge projects visual features to width
-                    2560.
-                  </p>
-                  <p>
-                    The decoder uses interleaved multimodal rotary coordinates: 64 rotary channels in a 256-channel main attention head, with
-                    temporal/height/width sections [11, 11, 10]. The released configuration has no deepstack visual injection layers.
-                    <sup><a href="#source-config">[2]</a></sup>
-                  </p>
-                </div>
-                <aside class="spec-box">
-                  <strong>448.93M weights</strong>
-                  <dl>
-                    <dt>Transformer</dt>
-                    <dd>27 layers &times; width 1152</dd>
-                    <dt>Heads / FFN</dt>
-                    <dd>16 / 4304</dd>
-                    <dt>Patch / temporal patch</dt>
-                    <dd>16 &times; 16 / 2</dd>
-                    <dt>Spatial merge</dt>
-                    <dd>2 &times; 2 &rarr; width 2560</dd>
-                  </dl>
-                </aside>
-              </div>
-              <div class="path">
-                <span>Images / video frames</span><span>Spatiotemporal patches</span><span>27 vision blocks</span><span>2 &times; 2 merge + MLP</span
-                ><span>Replace visual token embeddings</span><span>Shared decoder</span>
-              </div>
-              <div class="detail-grid">
-                <div>
-                  <h4>Variable visual token counts</h4>
-                  <p>
-                    Image resolution, video sampling, and patch merging determine the decoder's visual token count. Visual tokens consume context and
-                    follow the same decoder attention and MoE paths.
-                  </p>
-                </div>
-                <div>
-                  <h4>Native and extended context</h4>
-                  <p>
-                    The checkpoint sets 262,144 positions and RoPE theta 10,000,000. The model card describes YaRN extension to 1,000,000 tokens. The
-                    hosted Qwen3.8-Flash product advertises a default 1M context and additional built-in tools.
-                  </p>
-                </div>
-              </div>
+            <article class="reading-note" style="--accent: var(--gdn)">
+              <h3>Training still processes every token</h3>
+              <p>
+                Chunked kernels parallelize the recurrence. Backward needs Q/K/V, gates, and kernel-specific summaries, retained or recomputed. A
+                fixed-size decode state does not make total training activation memory constant.
+              </p>
             </article>
           </div>
+          <p class="source-note">
+            The release projects 16 Q/K heads and 48 value heads; each Q/K head serves three value heads. Per-head output RMSNorm and sigmoid gating
+            precede the 6144 &rarr; 2560 output projection. <a href="#source-config">Configuration</a> &middot;
+            <a href="#source-transformers">Reference</a>.
+          </p>
         </section>
 
         <section id="selection">
-          <h2>See complete-block selection happen</h2>
+          <div class="eyebrow">07 / The sparse attention layers</div>
+          <h2>Pool for selection, then read original K/V</h2>
           <p class="section-lede">
-            Move the query forward. Complete blocks compete for a fixed budget; the partial tail is always included. This 64-token illustration uses
-            synthetic scores and a reduced budget to make selection visible.
+            The indexer makes a compact search key for each complete four-token block. Top-k selects blocks; main attention reads their original token
+            K/V plus the current partial tail. Move the query and change document packing in this illustration.
           </p>
+          <ol class="tensor-path qsa-path">
+            <li>
+              <span class="step-number">1</span><strong>Produce indexer Q/K</strong><code>Q [T, 4, 128]<br />raw K [T, 128]</code>
+            </li>
+            <li>
+              <span class="step-number">2</span><strong>Pool complete blocks</strong><code>mean 4 raw keys<br />&rarr; [blocks, 128]</code>
+              <p>Then RMSNorm + RoPE, at the block's first position.</p>
+            </li>
+            <li>
+              <span class="step-number">3</span><strong>Score and select</strong
+              ><code>&Sigma; ReLU(q &middot; k) / &radic;128<br />top 512 blocks</code>
+              <p>Mask future blocks and other documents.</p>
+            </li>
+            <li>
+              <span class="step-number">4</span><strong>Read original tokens</strong><code>24 Q heads, 2 KV heads<br />up to 2048 + 3 tokens</code>
+              <p>Main K/V are full-resolution vectors of width 256.</p>
+            </li>
+          </ol>
           <div class="selector card">
             <div class="controls">
               <label class="grow" for="selection-query"
@@ -582,19 +532,570 @@
                   <option value="16">16 tokens / 4 blocks</option>
                 </select></label
               >
+              <label class="checkbox-label"><input id="selection-packed" type="checkbox" />Two documents, split after token 32</label>
             </div>
             <div class="legend">
               <span><i class="key" style="background: var(--qsa)"></i>Selected complete block</span
               ><span><i class="key" style="background: var(--gold)"></i>Included partial tail</span
-              ><span><i class="key op"></i>Visible, unselected</span><span>Hatched: future token</span>
+              ><span><i class="key op"></i>Visible, unselected</span><span>Hatched: future token</span><span>Crossed: earlier document</span>
             </div>
             <div class="token-grid" id="selection-grid" aria-label="Illustration of 64 token positions"></div>
             <div class="selector-readout" id="selection-readout" aria-live="polite"></div>
+            <div class="selection-score-list" id="selection-scores"></div>
             <p class="note">
               The released model uses the same block size of four, with a 2048-token budget. The scores here illustrate selection mechanics and are
               not predictions from the checkpoint.
             </p>
           </div>
+          <div class="reading-notes">
+            <article class="reading-note" style="--accent: var(--qsa)">
+              <h3>Sparse reads keep a growing cache</h3>
+              <p>
+                A later query may choose an old block, so main K/V remain available. The pinned reference also keeps raw indexer keys. A bounded read
+                budget is not a bounded stored prefix.
+              </p>
+            </article>
+            <article class="reading-note" style="--accent: var(--qsa)">
+              <h3>Search and attention have different scaling</h3>
+              <p>
+                One decode query scores roughly N/4 block keys, then attends to at most 2048 + 3 tokens. Across a whole prefill, indexer search still
+                has quadratic work. Fused sparse kernels and chunking matter at long contexts.
+              </p>
+            </article>
+          </div>
+          <details class="shape-note">
+            <summary>How does the indexer learn its selection?</summary>
+            <p>
+              The report first distills a dense-attention teacher into the indexer, then jointly trains with sparse attention. The sparse-stage
+              teacher sums detached main-attention probabilities across heads, max-pools within each selected complete block, and normalizes over
+              selected blocks. The KL loss trains selected indexer scores; integer top-k IDs are not differentiable. Teacher detachment and any
+              detachment of the indexer's hidden input are separate decisions. The report does not specify a KL coefficient, so this page does not
+              assign one.
+            </p>
+          </details>
+        </section>
+
+        <section id="lexical">
+          <div class="eyebrow">08 / Learn features for short token patterns</div>
+          <h2>PLE starts with token IDs, then retrieves learned rows</h2>
+          <p class="section-lede">
+            An ordinary embedding gives <code>good</code> one vector. A pair embedding could give <code>very good</code> and
+            <code>not good</code> different additional vectors. PLE implements this idea with bigram and trigram hashes, a large learned table, and
+            contextual gates.
+          </p>
+          <div class="ple-idea card">
+            <div>
+              <span class="label">The simplest version of the idea</span>
+              <pre><code>extra = pair_embedding[previous_id, current_id]
+hidden = hidden + extra</code></pre>
+              <p>
+                Training learns the extra feature vector. Attention can also learn these relationships; PLE adds another place to store short-pattern
+                features.
+              </p>
+            </div>
+            <div>
+              <span class="label">Why add hashing and multiple heads?</span>
+              <p>
+                A direct table for all 248,320<sup>2</sup> pairs would need about 61.7 billion rows; triples need far more. Hashes assign patterns to
+                a chosen bucket budget. Several heads give each pattern multiple lookups, so one collision need not make two patterns
+                indistinguishable.
+              </p>
+            </div>
+          </div>
+          <div class="stepped-demo card" style="--accent: var(--gold)">
+            <div class="demo-heading">
+              <div>
+                <span class="label">One token's lookup / no checkpoint weights loaded</span>
+                <h3>Build E [1, 16, 160] from sixteen addresses</h3>
+              </div>
+              <span class="demo-tag">Demo IDs and vectors; reference hashing</span>
+            </div>
+            <div class="controls">
+              <label
+                >Illustrative token sequence<select id="ple-sequence">
+                  <option value="city" selected>New | York | City</option>
+                  <option value="lake">Salt | Lake | City</option>
+                  <option value="very">very | good</option>
+                  <option value="not">not | good</option>
+                </select></label
+              >
+              <label class="grow" for="ple-position"
+                >Move the sequence to later positions: <output id="ple-position-label">0</output
+                ><input id="ple-position" type="range" min="0" max="200" step="10" value="0"
+              /></label>
+              <label class="checkbox-label"><input id="ple-boundary" type="checkbox" />Start a new document at the last token</label>
+            </div>
+            <div class="ple-token-history" id="ple-token-history"></div>
+            <div class="step-nav" role="group" aria-label="Lexical lookup walkthrough">
+              <button type="button" data-ple-step="0" aria-pressed="true">1 Collect IDs</button
+              ><button type="button" data-ple-step="1" aria-pressed="false">2 Hash</button
+              ><button type="button" data-ple-step="2" aria-pressed="false">3 Read rows</button
+              ><button type="button" data-ple-step="3" aria-pressed="false">4 Concatenate</button
+              ><button type="button" data-ple-step="4" aria-pressed="false">5 Context gate</button
+              ><button type="button" data-ple-step="5" aria-pressed="false">6 Add update</button>
+            </div>
+            <div id="ple-content" class="step-content" aria-live="polite"></div>
+            <div class="step-footer">
+              <button class="small-button" type="button" id="ple-prev" disabled>Previous</button><span id="ple-progress">Step 1 of 6</span
+              ><button class="small-button" type="button" id="ple-next">Next step &rarr;</button>
+            </div>
+            <p class="note">
+              The words have illustrative IDs, independent of the real tokenizer. Hashing uses signed 64-bit products/XOR, distinct prime bucket
+              counts, and head offsets from the pinned reference configuration. Displayed row vectors are synthetic, not checkpoint values.
+            </p>
+          </div>
+          <div class="reading-notes">
+            <article class="reading-note" style="--accent: var(--gold)">
+              <h3>Token content determines the addresses</h3>
+              <p>
+                Offsets t, t-1, and t-2 choose the recent IDs. The same pattern at another absolute position selects the same rows. Document
+                boundaries and EOS reset the available history; missing tokens use the EOS ID.
+              </p>
+            </article>
+            <article class="reading-note" style="--accent: var(--gold)">
+              <h3>Capacity and traffic are different</h3>
+              <p>
+                The table is [320,001,536, 160]: 51.2B parameters, or 95.37 GiB at BF16. A token reads only 16 &times; 160 elements, or 5 KiB, before
+                the projections. More buckets reduce sharing; they also increase weight and optimizer storage.
+              </p>
+            </article>
+            <article class="reading-note" style="--accent: var(--gold)">
+              <h3>IDs can be prepared before activations arrive</h3>
+              <p>
+                Hash addresses depend on original IDs. The report places PLE at layer 2 so its system can prefetch rows while layer 1 runs. A host
+                prefetch implementation needs a row owner, transfer buffers, and a backward update policy.
+              </p>
+            </article>
+            <article class="reading-note" style="--accent: var(--gold)">
+              <h3>A lookup is still learned model capacity</h3>
+              <p>
+                Rows are parameters trained through the downstream loss. Multiple uses of a row contribute gradients to that row. Selecting a few rows
+                does not by itself guarantee sparse gradient tensors or sparse optimizer work.
+              </p>
+            </article>
+          </div>
+          <p class="source-note">
+            PLE enters before layer 2's attention read. Its gated values are refined by a per-channel causal convolution with taps at t, t-3, t-6, and
+            t-9; the result is added to the existing streams. Hashing resets at EOS and document starts; the convolution resets at document starts.
+            <a href="#source-transformers">Reference implementation</a>.
+          </p>
+        </section>
+
+        <section id="experts">
+          <div class="eyebrow">09 / Routed compute</div>
+          <h2>MoE turns tokens into token-expert assignments</h2>
+          <p class="section-lede">
+            The MoE read gives x [T, 2560]. Each token chooses ten routed experts from 512; one shared expert also processes every token. Expert
+            parallelism assigns expert weights to owners and sends each assignment to the right owner.
+          </p>
+          <div class="expert-walk card">
+            <div class="controls">
+              <label
+                >Logical packed tokens T<select id="expert-tokens">
+                  <option value="1">1</option>
+                  <option value="4096" selected>4,096</option>
+                  <option value="8192">8,192</option>
+                </select></label
+              >
+              <p class="note" id="expert-assignments" aria-live="polite"></p>
+            </div>
+            <div class="expert-branches">
+              <div>
+                <span class="label">Routed branch / R = 10T over the expert group</span>
+                <ol class="tensor-path vertical-path">
+                  <li>
+                    <strong>Router, softmax, top 10</strong><code>[T, 512] &rarr; IDs and weights [T, 10]</code>
+                    <p>The chosen weights are normalized. Near ties, BF16 rounding can change the discrete expert IDs.</p>
+                  </li>
+                  <li>
+                    <strong>Dispatch to expert owners</strong><code>[T, 10, 2560] &rarr; [R, 2560]</code>
+                    <p>Permute assignments and communicate them. Rank-local counts depend on routing, not just R divided by EP degree.</p>
+                  </li>
+                  <li>
+                    <strong>Grouped SwiGLU experts</strong
+                    ><code>gate / up: [R, 640] each<br />SiLU(gate) &times; up: [R, 640]<br />down: [R, 2560]</code>
+                    <p>Each expert owns three matrices: [640, 2560], [640, 2560], and [2560, 640].</p>
+                  </li>
+                  <li>
+                    <strong>Weight, combine, return</strong><code>[R, 2560] &rarr; [T, 2560]</code>
+                    <p>Sum the ten expert outputs for each token using its mixing weights. Return results to the token owners.</p>
+                  </li>
+                </ol>
+              </div>
+              <div>
+                <span class="label">Shared branch / every token</span>
+                <ol class="tensor-path vertical-path">
+                  <li>
+                    <strong>One shared SwiGLU</strong><code>[T, 2560] &rarr; [T, 640] &rarr; [T, 2560]</code>
+                    <p>The shared expert has the same 640-channel intermediate width.</p>
+                  </li>
+                  <li>
+                    <strong>Scalar sigmoid gate</strong><code>x &rarr; [T, 1]</code>
+                    <p>A separate projection of the sublayer input gates the shared output.</p>
+                  </li>
+                  <li>
+                    <strong>Add both branches</strong><code>MoE update: [T, 2560]</code>
+                    <p>The MoE's four write gates then broadcast this one update back into H [T, 4, 2560].</p>
+                  </li>
+                </ol>
+              </div>
+            </div>
+            <p class="note">
+              One expert stores 3 &times; 2560 &times; 640 = 4.9152M weights. The 48 routed banks store 120.796B weights, while ten selected experts
+              per token account for 2.359B across those banks. Dispatch sizes here count logical payload, not measured network traffic or peak
+              activation memory.
+            </p>
+          </div>
+        </section>
+
+        <section id="training">
+          <div class="eyebrow">10 / Infrastructure and gradients</div>
+          <h2>Name the owner and lifetime of every tensor</h2>
+          <p class="section-lede">
+            Model capacity, serving state, saved activations, and optimizer state obey different scaling rules. A sharding plan must say which rank
+            owns each value, when it communicates, and how backward returns its gradients.
+          </p>
+          <div class="activation-tool card">
+            <div class="demo-heading">
+              <div>
+                <span class="label">Logical sizes / one decoder boundary and one expert dispatch</span>
+                <h3>Four streams change activation traffic</h3>
+              </div>
+              <span class="demo-tag">Sizes, not measured peak memory</span>
+            </div>
+            <div class="controls">
+              <label
+                >Logical packed tokens T<select id="training-tokens">
+                  <option value="1024">1,024</option>
+                  <option value="4096" selected>4,096</option>
+                  <option value="8192">8,192</option>
+                  <option value="16384">16,384</option>
+                </select></label
+              ><label
+                >Activation dtype<select id="training-dtype">
+                  <option value="2">BF16 / FP16</option>
+                  <option value="4">FP32</option>
+                </select></label
+              ><label
+                >TP degree<select id="training-tp">
+                  <option value="1">1</option>
+                  <option value="2" selected>2</option>
+                  <option value="4">4</option>
+                  <option value="8">8</option>
+                </select></label
+              ><label class="checkbox-label"><input id="training-sp" type="checkbox" checked />Shard carried tokens across TP ranks with SP</label>
+            </div>
+            <div class="footprint-grid" id="training-footprint" aria-live="polite"></div>
+            <p class="note" id="training-shape-note"></p>
+            <p class="note">
+              SP here shards the carried token dimension. It does not imply every intermediate remains sharded. The expert payload counts all ten
+              assignments per token over the expert group; local assignments and wire traffic depend on routing and placement. Original IDs and
+              document positions are counted separately at full logical T.
+            </p>
+          </div>
+
+          <h3 class="subsection-title">Parallelisms act on different parts of the model</h3>
+          <div class="table-wrap">
+            <table>
+              <caption class="visually-hidden">
+                Parallelism responsibilities for Qwen Flash-Next
+              </caption>
+              <thead>
+                <tr>
+                  <th scope="col">Mechanism</th>
+                  <th scope="col">What it divides</th>
+                  <th scope="col">What must still meet</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>Tensor parallelism / TP</td>
+                  <td>Selected projection and head dimensions; PLE can split each 160-feature table row across TP.</td>
+                  <td>Gathers or reductions reassemble required activations. The KL teacher's head sum must be global before block max pooling.</td>
+                </tr>
+                <tr>
+                  <td>Sequence parallelism / SP</td>
+                  <td>The carried [T, 4, D] activation can split T over TP ranks.</td>
+                  <td>Sublayers may gather tokens. Document-local block and n-gram history must remain valid at shard boundaries.</td>
+                </tr>
+                <tr>
+                  <td>Expert parallelism / EP</td>
+                  <td>Expert weight ownership and routed token-expert assignments.</td>
+                  <td>Dispatch and combine preserve IDs, weights, and permutations; backward reverses the routing.</td>
+                </tr>
+                <tr>
+                  <td>FSDP</td>
+                  <td>Parameter, gradient, and optimizer storage over data-sharding ranks.</td>
+                  <td>A parameter gather for forward can be much larger than the few lexical rows the token uses.</td>
+                </tr>
+                <tr>
+                  <td>Pipeline parallelism / PP</td>
+                  <td>The sequential layer stack and its weights.</td>
+                  <td>
+                    Send [T, 4, D] stage activations and backward gradients. Original IDs and document positions must reach the stage holding PLE.
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="callout">
+            <strong>A concrete eight-rank arrangement:</strong> DP2 &times; TP2 &times; PP2 uses eight ranks. The validated reduced-model run also
+            uses EP4, arranged within that rank world. EP is not an additional factor of four in the GPU count. The exact expert mesh and FSDP groups
+            depend on the selected layout.
+          </div>
+
+          <h3 class="subsection-title">Persistent storage and transient reads have different owners</h3>
+          <div class="table-wrap">
+            <table>
+              <caption class="visually-hidden">
+                Memory ownership, lifetime, and backward requirements
+              </caption>
+              <thead>
+                <tr>
+                  <th scope="col">Value</th>
+                  <th scope="col">Owner and lifetime</th>
+                  <th scope="col">Backward responsibility</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>Four-stream H<br /><code>[T, 4, 2560]</code></td>
+                  <td>Current layer or pipeline stage, per microbatch. Boundary tensors live until the schedule can release them.</td>
+                  <td>
+                    Residual additions pass identity gradients; read and write gates add learned branches. Checkpointing retains boundaries and
+                    recomputes internal values.
+                  </td>
+                </tr>
+                <tr>
+                  <td>GDN state<br /><code>[48, 128, 128]</code> / layer</td>
+                  <td>Each GDN layer and active serving sequence. Training uses layer-local recurrent/chunk summaries.</td>
+                  <td>Differentiate through the recurrence; retain or recompute Q/K/V, gates, and backend summaries.</td>
+                </tr>
+                <tr>
+                  <td>QSA K/V and indexer keys</td>
+                  <td>Each QSA layer; history grows with N during serving. Training K/V belong to that microbatch's graph.</td>
+                  <td>
+                    Selected attention returns gradients to original K/V positions. Kernel storage and scatter accumulation must respect selection and
+                    boundaries.
+                  </td>
+                </tr>
+                <tr>
+                  <td>Top-k block and expert IDs</td>
+                  <td>Per query or token. Used by gathers, dispatch, and their backward paths.</td>
+                  <td>The integer IDs carry no gradient. Selected scores and mixing weights remain differentiable under the relevant objective.</td>
+                </tr>
+                <tr>
+                  <td>Lexical table rows</td>
+                  <td>Model weights persist across batches and requests. Row or feature owners serve transient fetched vectors.</td>
+                  <td>Return row gradients to their owners and sum repeated uses. Hash functions are fixed; row vectors are learned.</td>
+                </tr>
+                <tr>
+                  <td>Original IDs and document positions</td>
+                  <td>Per microbatch, available to every consumer that needs original token history or packed boundaries.</td>
+                  <td>
+                    These integer inputs carry no gradient. They must survive rematerialization and pipeline placement independently of visual rotary
+                    coordinates.
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <h3 class="subsection-title">Trace gradients through lookup and selection</h3>
+          <div class="gradient-grid">
+            <article class="gradient-card card" style="--accent: var(--gold)">
+              <h4>PLE</h4>
+              <div class="gradient-chain">
+                <span>IDs &rarr; hash addresses<small>Fixed integer path</small></span
+                ><span>Selected rows &rarr; key/value projections<small>Learned parameters</small></span
+                ><span
+                  >Context gate &rarr; convolution &rarr; H + delta<small>Loss gradients return to rows, projections, and incoming H</small></span
+                >
+              </div>
+              <p>
+                Addresses depend on IDs; gates depend on hidden states. The lookup tensor is an activation containing selected learned rows, not a new
+                full table.
+              </p>
+            </article>
+            <article class="gradient-card card" style="--accent: var(--qsa)">
+              <h4>QSA</h4>
+              <div class="gradient-chain">
+                <span>Indexer scores &rarr; top-k IDs<small>Discrete selection</small></span
+                ><span>IDs &rarr; original K/V gather &rarr; attention<small>Main loss updates Q/K/V</small></span
+                ><span>Detached teacher + selected scores &rarr; KL<small>Auxiliary objective updates the indexer</small></span>
+              </div>
+              <p>
+                Detaching the teacher stops its gradient branch. Whether the indexer's input also receives KL gradients is a separate training policy;
+                it must be established before claiming exact training equivalence.
+              </p>
+            </article>
+          </div>
+
+          <h3 class="subsection-title">A 5 KiB lookup can sit behind a 95 GiB parameter</h3>
+          <div class="table-wrap">
+            <table>
+              <caption class="visually-hidden">
+                Lexical storage and computation accounting
+              </caption>
+              <thead>
+                <tr>
+                  <th scope="col">Quantity</th>
+                  <th scope="col">BF16 table convention</th>
+                  <th scope="col">Infrastructure consequence</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>All table weights</td>
+                  <td>51,200,245,760 elements &times; 2 bytes = 95.37 GiB</td>
+                  <td>Persist, shard, or offload them independently of current token count.</td>
+                </tr>
+                <tr>
+                  <td>One token's selected features</td>
+                  <td>16 &times; 160 &times; 2 bytes = 5 KiB</td>
+                  <td>Predictable addresses permit deduplication and prefetch; transfer scheduling still needs an implementation.</td>
+                </tr>
+                <tr>
+                  <td>Two FP32 Adam moments</td>
+                  <td>51,200,245,760 &times; 8 bytes = 381.47 GiB</td>
+                  <td>This is before gradients, any master weights, and sharding. Sparse reads alone do not remove optimizer storage.</td>
+                </tr>
+                <tr>
+                  <td>Illustrative TP2 feature slice</td>
+                  <td>[320,001,536, 80], or 47.68 GiB of weights</td>
+                  <td>
+                    With row-FSDP2 it could store 23.84 GiB at rest, then unshard the 47.68 GiB TP slice for forward. This is a storage scenario, not
+                    measured peak memory.
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <p class="note">
+            A custom row-fetch path can move selected rows instead of materializing a full parameter slice. Standard parameter sharding and checkpoint
+            row chunks do not by themselves provide that path. Full-scale PLE unsharding, host prefetch, and distributed checkpoint conversion still
+            need validation in the TorchTitan port.
+          </p>
+
+          <h3 class="subsection-title">Compilation and scheduling must preserve the computation</h3>
+          <div class="reading-notes">
+            <article class="reading-note" style="--accent: var(--qsa)">
+              <h4>Keep selections and BF16 rounding faithful</h4>
+              <p>
+                Fusion must preserve the router's activation-dtype rounding before softmax/top-k. Dynamic block construction and selection need
+                explicit CUDA graph support or a clear unsupported configuration.
+              </p>
+            </article>
+            <article class="reading-note" style="--accent: var(--residual)">
+              <h4>Batch work across query chunks</h4>
+              <p>
+                Bounded temporary tensors help memory, but Python loops, repeated metadata synchronization, and one collective per small chunk can
+                dominate. Aggregate teacher reductions where possible and measure the selected kernel path.
+              </p>
+            </article>
+          </div>
+
+          <h3 class="subsection-title">Optimizer assignments follow parameter roles</h3>
+          <div class="infra-grid">
+            <article class="infra-card card" style="--accent: var(--moe)">
+              <h3>Muon for genuine linear maps</h3>
+              <p>
+                Attention/GDN projections, expert matrices, and PLE key/value projections use Muon. Fused matrices are split into their semantic
+                operators before orthogonalization; the report uses per-head splitting for attention and GDN.
+              </p>
+            </article>
+            <article class="infra-card card" style="--accent: var(--residual)">
+              <h3>AdamW where the structure differs</h3>
+              <p>
+                Input/output tables, routers, and GR's elongated low-rank projections use AdamW. The n-gram table uses Adam with weight decay
+                disabled. The optimizer assignment follows the role and shape of each weight.
+              </p>
+            </article>
+            <article class="infra-card card" style="--accent: var(--gold)">
+              <h3>Prefetch lexical rows early</h3>
+              <p>
+                Hash addresses depend on token IDs, so lookups can be prepared before the decoder reaches PLE. Placing PLE at layer 2 creates overlap
+                with layer 1's computation and makes host-memory storage practical in the report's system.
+              </p>
+            </article>
+            <article class="infra-card card" style="--accent: var(--qsa)">
+              <h3>Distill before sparse training</h3>
+              <p>
+                A dense-attention teacher first trains the indexer. Sparse continued pretraining then adapts both the backbone and indexer. The
+                report's QSA objective learns block relevance from detached main-attention probabilities.
+              </p>
+            </article>
+          </div>
+          <div class="callout">
+            <strong>Reported kernel efficiency:</strong> at a 1M context, the report measures 7.6&times; prefill and 4.9&times; decode speedups for
+            the attention module, including indexing and sparse attention. Its settings use 16K chunked prefill at batch size 1, and decode at batch
+            size 4 with speculative steps. These measurements apply to the report's fused kernels and benchmark settings.
+          </div>
+          <p class="note">
+            The report also refits batch-size and learning-rate scaling laws and starts at the target batch size without traditional batch-size
+            warmup. GR's gated normalization is evaluated for training stability under larger learning rates.
+          </p>
+          <h3 class="subsection-title" id="evidence">What has actually been established?</h3>
+          <div class="table-wrap">
+            <table>
+              <caption class="visually-hidden">
+                Evidence and the scope of each claim
+              </caption>
+              <thead>
+                <tr>
+                  <th scope="col">Evidence</th>
+                  <th scope="col">Established</th>
+                  <th scope="col">Scope</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>Released report</td>
+                  <td>Architecture, optimizer choices, and reported attention-module benchmarks.</td>
+                  <td>The 7.6&times; / 4.9&times; results describe the report's kernels and settings, not the current TorchTitan implementation.</td>
+                </tr>
+                <tr>
+                  <td>Pinned checkpoint audit</td>
+                  <td>All 1658 tensor shapes across 131 shard headers; exact stored element counts.</td>
+                  <td>Header-only accounting establishes schema and weight bytes, not full-model loading or runtime memory.</td>
+                </tr>
+                <tr>
+                  <td>TorchTitan same-weight checks</td>
+                  <td>Reduced GR/PLE/QSA/vision checks and eight-layer BF16 logits. Logit maximum error 0.001953125; cosine similarity 0.9999964.</td>
+                  <td>
+                    A reduced reference comparison, with documented BF16 routing sensitivity. It does not prove bitwise equality for every execution
+                    layout.
+                  </td>
+                </tr>
+                <tr>
+                  <td>TorchTitan distributed training snapshot</td>
+                  <td>
+                    Ten steps with real FSDP2/TP2/EP4/PP2 on eight GB200 GPUs; independent TP2/EP2/SP replay matched recorded loss and grad_norm
+                    exactly.
+                  </td>
+                  <td>
+                    Reduced models on the recorded October snapshot. Full 177B training, B200 CI golden portability, current-main compilation, CP, and
+                    production throughput remain unverified.
+                  </td>
+                </tr>
+                <tr>
+                  <td>Interactive examples on this page</td>
+                  <td>Shape transformations, reference hashing, and numerical teaching examples.</td>
+                  <td>
+                    Synthetic tokens, small illustrative states and weights, and analytical sizes. These are not model predictions or profiler
+                    measurements.
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <p class="source-note">
+            Implementation evidence refers to the <a href="https://github.com/pytorch/torchtitan/pull/5655">draft TorchTitan port</a> and its
+            <a
+              href="https://github.com/shuhuayu/torchtitan/blob/573078b6b017fcafec5d4f63c0ac2ac0b18e6975/torchtitan/models/qwen3_8_flash_next/README.md"
+              >pinned validation snapshot</a
+            >. The draft still has review follow-ups; the blog describes the architecture and the limits of the available evidence.
+          </p>
         </section>
 
         <section id="parameters">
@@ -729,51 +1230,382 @@
           </p>
         </section>
 
-        <section id="training">
-          <h2>The training recipe follows the architecture</h2>
+        <section id="components">
+          <h2>Reference: six component specifications</h2>
           <p class="section-lede">
-            The report treats optimizer choice, residual stability, and memory movement as part of the design. These are findings from the released
-            model's training study. <sup><a href="#source-report">[3]</a></sup>
+            The three main additions are QSA, gated residuals, and lexical embeddings. GDN, routed experts, and the vision pathway remain the
+            foundation of the hybrid decoder. <sup><a href="#source-card">[1]</a></sup>
           </p>
-          <div class="infra-grid">
-            <article class="infra-card card" style="--accent: var(--moe)">
-              <h3>Muon for genuine linear maps</h3>
-              <p>
-                Attention/GDN projections, expert matrices, and PLE key/value projections use Muon. Fused matrices are split into their semantic
-                operators before orthogonalization; the report uses per-head splitting for attention and GDN.
-              </p>
-            </article>
-            <article class="infra-card card" style="--accent: var(--residual)">
-              <h3>AdamW where the structure differs</h3>
-              <p>
-                Input/output tables, routers, and GR's elongated low-rank projections use AdamW. The n-gram table uses Adam with weight decay
-                disabled. The optimizer assignment follows the role and shape of each weight.
-              </p>
-            </article>
-            <article class="infra-card card" style="--accent: var(--gold)">
-              <h3>Prefetch lexical rows early</h3>
-              <p>
-                Hash addresses depend on token IDs, so lookups can be prepared before the decoder reaches PLE. Placing PLE at layer 2 creates overlap
-                with layer 1's computation and makes host-memory storage practical in the report's system.
-              </p>
-            </article>
-            <article class="infra-card card" style="--accent: var(--qsa)">
-              <h3>Distill before sparse training</h3>
-              <p>
-                A dense-attention teacher first trains the indexer. Sparse continued pretraining then adapts both the backbone and indexer. The
-                report's QSA objective learns block relevance from detached main-attention probabilities.
-              </p>
-            </article>
+          <div class="tabs" role="tablist" aria-label="Architecture component">
+            <button class="tab" id="tab-gdn" role="tab" aria-selected="true" aria-controls="panel-gdn" data-tab="gdn" type="button">
+              Gated DeltaNet
+            </button>
+            <button class="tab" id="tab-qsa" role="tab" aria-selected="false" aria-controls="panel-qsa" data-tab="qsa" type="button" tabindex="-1">
+              QSA
+            </button>
+            <button class="tab" id="tab-gr" role="tab" aria-selected="false" aria-controls="panel-gr" data-tab="gr" type="button" tabindex="-1">
+              Gated residual
+            </button>
+            <button class="tab" id="tab-ple" role="tab" aria-selected="false" aria-controls="panel-ple" data-tab="ple" type="button" tabindex="-1">
+              Lexical embeddings
+            </button>
+            <button class="tab" id="tab-moe" role="tab" aria-selected="false" aria-controls="panel-moe" data-tab="moe" type="button" tabindex="-1">
+              MoE
+            </button>
+            <button
+              class="tab"
+              id="tab-vision"
+              role="tab"
+              aria-selected="false"
+              aria-controls="panel-vision"
+              data-tab="vision"
+              type="button"
+              tabindex="-1"
+            >
+              Vision
+            </button>
           </div>
-          <div class="callout">
-            <strong>Reported kernel efficiency:</strong> at a 1M context, the report measures 7.6&times; prefill and 4.9&times; decode speedups for
-            the attention module, including indexing and sparse attention. Its settings use 16K chunked prefill at batch size 1, and decode at batch
-            size 4 with speculative steps. These measurements apply to the report's fused kernels and benchmark settings.
+          <div class="card">
+            <div class="component-panel" id="panel-gdn" role="tabpanel" aria-labelledby="tab-gdn" data-panel="gdn" style="--accent: var(--gdn)">
+              <div class="component-intro">
+                <div>
+                  <h3>Gated DeltaNet: history in a fixed-size state</h3>
+                  <p>
+                    GDN is a gated delta-rule recurrence. Short causal convolutions prepare Q/K/V; a decay gate forgets old state, and a beta gate
+                    controls a corrective write. Chunked training computes this recurrence in parallel; token-by-token decoding carries the state
+                    forward.
+                  </p>
+                  <p>
+                    Sixteen Q/K heads feed forty-eight value heads, so each Q/K head serves three value heads. The output uses per-head RMS
+                    normalization and a <strong>sigmoid</strong> gate in this release. <sup><a href="#source-transformers">[4]</a></sup>
+                  </p>
+                </div>
+                <aside class="spec-box">
+                  <strong>36 layers</strong>
+                  <dl>
+                    <dt>Q/K</dt>
+                    <dd>16 &times; 128</dd>
+                    <dt>V / output gate</dt>
+                    <dd>48 &times; 128</dd>
+                    <dt>QKV convolution</dt>
+                    <dd>10,240 channels &times; width 4</dd>
+                    <dt>Recurrent state / layer</dt>
+                    <dd>[48, 128, 128]</dd>
+                  </dl>
+                </aside>
+              </div>
+              <div class="path">
+                <span>x [T, 2560]</span><span>Q/K/V + causal conv</span><span>Q/K L2 norm</span><span>Gated delta rule</span
+                ><span>RMSNorm &times; sigmoid gate</span><span>Output &rarr; 2560</span>
+              </div>
+              <div class="formula">
+                S&#771;<sub>t</sub> = &alpha;<sub>t</sub> S<sub>t-1</sub><br />S<sub>t</sub> = S&#771;<sub>t</sub> + &beta;<sub>t</sub> k<sub>t</sub>
+                (v<sub>t</sub> - S&#771;<sub>t</sub><sup>T</sup> k<sub>t</sub>)<sup>T</sup><br />o<sub>t</sub> = S<sub>t</sub><sup>T</sup> q<sub
+                  >t</sub
+                >
+              </div>
+              <div class="detail-grid">
+                <div>
+                  <h4>Persistent state</h4>
+                  <p>
+                    The thirty-six recurrent matrices occupy 108 MiB at FP32 per sequence, independent of context length. Short-convolution history
+                    adds a small fixed term.
+                  </p>
+                </div>
+                <div>
+                  <h4>Compute and normalization</h4>
+                  <p>
+                    The main projections produce QKV width 10,240 and gate width 6,144. The beta and decay projections each produce 48 scalars per
+                    token. State accumulation and normalization use higher precision than BF16 activations.
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            <div class="component-panel" id="panel-qsa" role="tabpanel" aria-labelledby="tab-qsa" data-panel="qsa" style="--accent: var(--qsa)">
+              <div class="component-intro">
+                <div>
+                  <h3>Qwen Sparse Attention: select blocks, then read tokens</h3>
+                  <p>
+                    A small multi-query indexer predicts relevance for complete four-token blocks. It averages raw keys inside each block, then
+                    normalizes and applies positional encoding using the first token's position. Four query heads score each block; their rectified
+                    scores are summed.
+                  </p>
+                  <p>
+                    Top-k chooses up to 512 blocks. Main GQA uses the <strong>original, unpooled K/V</strong> of the selected 2048 tokens, plus up to
+                    three tokens in the current incomplete block. Causality and document boundaries apply to both selection and attention.
+                    <sup><a href="#source-report">[3]</a></sup>
+                  </p>
+                </div>
+                <aside class="spec-box">
+                  <strong>12 layers</strong>
+                  <dl>
+                    <dt>Main Q / KV heads</dt>
+                    <dd>24 / 2, width 256</dd>
+                    <dt>Main rotary channels</dt>
+                    <dd>64 of 256</dd>
+                    <dt>Indexer Q / K heads</dt>
+                    <dd>4 / 1, width 128</dd>
+                    <dt>Budget</dt>
+                    <dd>512 blocks + partial tail</dd>
+                  </dl>
+                </aside>
+              </div>
+              <div class="path">
+                <span>Indexer Q / raw K</span><span>Average 4 raw keys</span><span>Norm + RoPE</span><span>Top 512 blocks</span
+                ><span>Expand to token IDs</span><span>Selected-token GQA</span>
+              </div>
+              <div class="formula">
+                k&#772;<sub>b</sub> = RoPE(RMSNorm(mean(raw_k[4b : 4b+4])), position[4b])<br />score(q, b) = &Sigma;<sub>h=1..4</sub> ReLU(q<sub
+                  >h</sub
+                >
+                &middot; k&#772;<sub>b</sub>) / &radic;128<br />selected = tokens(top_512_complete_blocks) &cup; incomplete_tail
+              </div>
+              <div class="detail-grid">
+                <div>
+                  <h4>Two training stages</h4>
+                  <p>
+                    The report introduces QSA during continued pretraining: first distill a dense-attention teacher into the indexer, then jointly
+                    train the backbone and indexer with sparse attention and a selected-block KL objective.
+                  </p>
+                </div>
+                <div>
+                  <h4>Two different costs</h4>
+                  <p>
+                    The sparse attention core reads a bounded token budget. The indexer still scores the growing set of compressed blocks;
+                    whole-sequence prefill indexing remains quadratic in sequence length, reduced by the factor-four compression.
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            <div class="component-panel" id="panel-gr" role="tabpanel" aria-labelledby="tab-gr" data-panel="gr" style="--accent: var(--residual)">
+              <div class="component-intro">
+                <div>
+                  <h3>Gated residual: four streams, one sublayer input</h3>
+                  <p>
+                    The persistent residual is [T, 4, 2560], or [T, 10240] when flattened. Each stream is normalized independently. A 10,240 &rarr;
+                    320 &rarr; 10,240 bottleneck predicts an element-wise sigmoid read gate. Averaging the gated streams produces a width-2560 input
+                    for the sublayer.
+                  </p>
+                  <p>
+                    Four scalar write gates send the sublayer's output back into the four streams. Attention and MoE have independent read/write
+                    modules. A final read-only mixer reduces the streams before the LM head; the reference has no separate final RMSNorm.
+                    <sup><a href="#source-transformers">[4]</a></sup>
+                  </p>
+                </div>
+                <aside class="spec-box">
+                  <strong>96 read/write modules + final read</strong>
+                  <dl>
+                    <dt>Residual channels</dt>
+                    <dd>4 &times; 2560 = 10,240</dd>
+                    <dt>Read bottleneck</dt>
+                    <dd>Rank 320</dd>
+                    <dt>Read gate</dt>
+                    <dd>One value / stream / channel</dd>
+                    <dt>Write gate</dt>
+                    <dd>One scalar / stream</dd>
+                  </dl>
+                </aside>
+              </div>
+              <div class="path">
+                <span>4 residual streams</span><span>Grouped RMSNorm</span><span>Low-rank read gates</span><span>Mean gated read &rarr; D</span
+                ><span>Sublayer F(x)</span><span>4 scalar writes</span>
+              </div>
+              <div class="formula">
+                R&#770;<sub>i</sub> = GroupRMSNorm(R<sub>i</sub>)<br />G = &sigma;(W<sub>up</sub> SiLU(W<sub>down</sub> vec(R&#770;) / 4))<br />x =
+                mean<sub>i</sub>(G<sub>i</sub> &odot; R&#770;<sub>i</sub>), s = 2&sigma;(W<sub>write</sub> vec(R&#770;) / 4)<br />R&prime;<sub>i</sub>
+                = R<sub>i</sub> + s<sub>i</sub> F(x)
+              </div>
+              <div class="detail-grid">
+                <div>
+                  <h4>Width in the residual path</h4>
+                  <p>
+                    Attention and expert projections operate at D = 2560. The wider residual path increases activation traffic and gives the model
+                    different learned reads of accumulated information.
+                  </p>
+                </div>
+                <div>
+                  <h4>Compared with Kimi's Attention Residuals</h4>
+                  <p>
+                    Kimi K3 retrieves earlier depth summaries using attention. GR keeps four streams and learns channel-wise read gates plus scalar
+                    writes. Its design omits an additional stream-to-stream residual mixing matrix.
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            <div class="component-panel" id="panel-ple" role="tabpanel" aria-labelledby="tab-ple" data-panel="ple" style="--accent: var(--gold)">
+              <div class="component-intro">
+                <div>
+                  <h3>Lexical embeddings: a large table with a small read</h3>
+                  <p>
+                    Eight bigram and eight trigram hash heads each address a distinct prime-sized vocabulary near twenty million slots. Their tables
+                    are concatenated into 320,001,536 padded rows, each with 160 features. Sixteen lookups concatenate to [T, 2560].
+                  </p>
+                  <p>
+                    The lexical features project to one shared value and four stream-specific keys. Normalized residual streams gate the value. A
+                    width-four causal convolution with dilation three adds local lexical context. The result is added before layer 2's attention read.
+                    <sup><a href="#source-config">[2]</a></sup>
+                  </p>
+                </div>
+                <aside class="spec-box">
+                  <strong>One lexical layer: layer 2</strong>
+                  <dl>
+                    <dt>Hash heads</dt>
+                    <dd>8 bigram + 8 trigram</dd>
+                    <dt>Table</dt>
+                    <dd>320,001,536 &times; 160</dd>
+                    <dt>Checkpoint storage</dt>
+                    <dd>128 row chunks</dd>
+                    <dt>Lookup / token</dt>
+                    <dd>16 &times; 160 features</dd>
+                  </dl>
+                </aside>
+              </div>
+              <div class="path">
+                <span>Original token IDs</span><span>Document-local n-gram hashes</span><span>16 sparse lookups</span
+                ><span>Key / value projections</span><span>Stream gates + causal conv</span><span>Add [T, 10240]</span>
+              </div>
+              <div class="formula">
+                e<sub>t</sub> = concat(lookup<sub>h</sub>(hash<sub>h</sub>(token history))) &isin; R<sup>2560</sup><br />gate<sub>i</sub> =
+                &sigma;(sign(a<sub>i</sub>) &radic;max(|a<sub>i</sub>|, 10<sup>-6</sup>)), a<sub>i</sub> = norm(key<sub>i</sub>) &middot;
+                norm(R<sub>i</sub>) / &radic;2560<br />u<sub>i</sub> = gate<sub>i</sub> value; PLE<sub>i</sub> = u<sub>i</sub> +
+                SiLU(causal_conv(norm(u<sub>i</sub>)))
+              </div>
+              <div class="detail-grid">
+                <div>
+                  <h4>Weight capacity and bandwidth</h4>
+                  <p>
+                    The BF16 table alone is 95.37 GiB. Each token reads 5 KiB of lexical features before projections. The report places PLE at layer 2
+                    so predictable lookups can be prefetched from host memory while layer 1 runs.
+                  </p>
+                </div>
+                <div>
+                  <h4>Token metadata must survive</h4>
+                  <p>
+                    Hashing requires original IDs and resets history at EOS. Packed training also needs document boundaries, including when PLE lives
+                    on a later pipeline stage. Multimodal rotary coordinates do not replace that lexical history.
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            <div class="component-panel" id="panel-moe" role="tabpanel" aria-labelledby="tab-moe" data-panel="moe" style="--accent: var(--moe)">
+              <div class="component-intro">
+                <div>
+                  <h3>MoE: 512 experts behind a width-640 intermediate</h3>
+                  <p>
+                    Every layer routes each token to ten of 512 SwiGLU experts and also evaluates one shared expert. Each expert has gate, up, and
+                    down matrices at widths 2560 and 640. Selected router probabilities are normalized; the shared expert has its own sigmoid output
+                    gate.
+                  </p>
+                  <p>
+                    Routing uses FP32 softmax on activation-rounded logits, then casts expert mixing weights to the activation dtype. Small BF16
+                    rounding differences near a tie can change the discrete expert IDs. <sup><a href="#source-transformers">[4]</a></sup>
+                  </p>
+                </div>
+                <aside class="spec-box">
+                  <strong>48 expert banks</strong>
+                  <dl>
+                    <dt>Routed selection</dt>
+                    <dd>512 choose 10</dd>
+                    <dt>Shared experts</dt>
+                    <dd>1 &times; gated SwiGLU</dd>
+                    <dt>Per expert</dt>
+                    <dd>3 &times; 2560 &times; 640 = 4.9152M</dd>
+                    <dt>Global assignments</dt>
+                    <dd>R = 10T</dd>
+                  </dl>
+                </aside>
+              </div>
+              <div class="path">
+                <span>Router [T, 512]</span><span>Top 10 + normalize</span><span>Dispatch R tokens</span><span>Grouped expert GEMMs</span
+                ><span>Weighted combine</span><span>+ gated shared expert</span>
+              </div>
+              <div class="formula">
+                expert(x) = W<sub>down</sub>(SiLU(W<sub>gate</sub>x) &odot; W<sub>up</sub>x)<br />MoE(x) = &Sigma;<sub>e &isin; top10</sub> p<sub
+                  >e</sub
+                >
+                expert<sub>e</sub>(x) + &sigma;(w<sub>shared</sub>x) shared(x)<br />routed bank = 48 &times; 512 &times; 3 &times; 2560 &times; 640 =
+                120.796B weights
+              </div>
+              <div class="detail-grid">
+                <div>
+                  <h4>Storage versus selected matrices</h4>
+                  <p>
+                    The routed bank holds 120.796B weights. Ten experts per token select 2.359B of those weights across all layers. Routers,
+                    attention, residual mixers, and the LM head add to the token's active path.
+                  </p>
+                </div>
+                <div>
+                  <h4>Expert parallelism</h4>
+                  <p>
+                    Dispatch and combine exchange token activations across expert owners. R is a logical group-wide assignment count; expert imbalance
+                    and placement determine how many assignments each GPU receives.
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            <div
+              class="component-panel"
+              id="panel-vision"
+              role="tabpanel"
+              aria-labelledby="tab-vision"
+              data-panel="vision"
+              style="--accent: var(--vision)"
+            >
+              <div class="component-intro">
+                <div>
+                  <h3>Vision: patch tokens enter the same decoder</h3>
+                  <p>
+                    A twenty-seven-layer vision transformer uses width 1152, sixteen heads, and intermediate width 4304. A spatiotemporal patch
+                    embedding consumes [3, 2, 16, 16] patches for images and video. A 2 &times; 2 spatial merge projects visual features to width
+                    2560.
+                  </p>
+                  <p>
+                    The decoder uses interleaved multimodal rotary coordinates: 64 rotary channels in a 256-channel main attention head, with
+                    temporal/height/width sections [11, 11, 10]. The released configuration has no deepstack visual injection layers.
+                    <sup><a href="#source-config">[2]</a></sup>
+                  </p>
+                </div>
+                <aside class="spec-box">
+                  <strong>448.93M weights</strong>
+                  <dl>
+                    <dt>Transformer</dt>
+                    <dd>27 layers &times; width 1152</dd>
+                    <dt>Heads / FFN</dt>
+                    <dd>16 / 4304</dd>
+                    <dt>Patch / temporal patch</dt>
+                    <dd>16 &times; 16 / 2</dd>
+                    <dt>Spatial merge</dt>
+                    <dd>2 &times; 2 &rarr; width 2560</dd>
+                  </dl>
+                </aside>
+              </div>
+              <div class="path">
+                <span>Images / video frames</span><span>Spatiotemporal patches</span><span>27 vision blocks</span><span>2 &times; 2 merge + MLP</span
+                ><span>Replace visual token embeddings</span><span>Shared decoder</span>
+              </div>
+              <div class="detail-grid">
+                <div>
+                  <h4>Variable visual token counts</h4>
+                  <p>
+                    Image resolution, video sampling, and patch merging determine the decoder's visual token count. Visual tokens consume context and
+                    follow the same decoder attention and MoE paths.
+                  </p>
+                </div>
+                <div>
+                  <h4>Native and extended context</h4>
+                  <p>
+                    The checkpoint sets 262,144 positions and RoPE theta 10,000,000. The model card describes YaRN extension to 1,000,000 tokens. The
+                    hosted Qwen3.8-Flash product advertises a default 1M context and additional built-in tools.
+                  </p>
+                </div>
+              </div>
+            </div>
           </div>
-          <p class="note">
-            The report also refits batch-size and learning-rate scaling laws and starts at the target batch size without traditional batch-size
-            warmup. GR's gated normalization is evaluated for training stability under larger learning rates.
-          </p>
         </section>
 
         <section class="sources" id="sources">
@@ -818,12 +1650,14 @@
             cache memory, and physical GPU placement.
           </p>
           <p>
-            Presentation follows the <a href="./kimi-k3.html">Kimi K3 architecture study</a>, which was inspired by
+            The step-by-step presentation follows the <a href="./deepseek-v4-1-flash.html">DeepSeek V4.1 Flash walkthrough</a> and the
+            <a href="./kimi-k3.html">Kimi K3 architecture study</a>, which was inspired by
             <a href="https://deepseek-v3.ezyang.com/studies/01-deepseek-diagram.html">Edward Yang's DeepSeek diagram</a>. This page's dimensions,
             graph, and accounting are specific to Qwen3.8-Flash-Next.
           </p>
           <nav class="series-footer" aria-label="Related architecture studies">
-            <a href="./kimi-k3.html">Related: Kimi K3 architecture &rarr;</a><a href="./kimi-k3-memory.html">Related: Kimi K3 memory study &rarr;</a
+            <a href="./deepseek-v4-1-flash.html">Related: DeepSeek V4.1 Flash &rarr;</a
+            ><a href="./kimi-k3.html">Related: Kimi K3 architecture &rarr;</a><a href="./kimi-k3-memory.html">Related: Kimi K3 memory study &rarr;</a
             ><a href="https://huggingface.co/Qwen/Qwen3.8-Flash-Next">Released Qwen checkpoint &rarr;</a>
           </nav>
         </section>
