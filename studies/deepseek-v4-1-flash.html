@@ -716,6 +716,7 @@
                 tokens; the release hashes compressed tokenizer IDs using multiple heads and distinct prime table sizes. The slider demonstrates
                 gating and does not run the model.
               </p>
+              <p class="note"><a href="#engram-equations">Read the actual gate and residual equations &darr;</a></p>
             </div>
             <div class="lookup-metrics">
               <div class="metric"><strong>48 rows</strong><span>accessed per text token across both modules</span></div>
@@ -723,6 +724,110 @@
               <div class="metric"><strong>196.6B</strong><span>table elements derived from the released config</span></div>
             </div>
           </div>
+          <article class="engram-equations card" id="engram-equations" aria-labelledby="engram-equations-title">
+            <span class="label">Equations behind the lookup / Engram.forward</span>
+            <h3 id="engram-equations-title">From phrase features to a four-stream residual update</h3>
+            <p class="note">
+              At L2 and L15, Engram receives the incoming four residual streams X and the concatenated phrase features E. T counts token positions; r
+              indexes one of the four streams; D = 5120. Batch dimensions are omitted.
+            </p>
+            <div class="engram-shapes" aria-label="Engram tensor shapes">
+              <span>X <code>[T, 4, D]</code></span
+              ><span>E <code>[T, 6144]</code></span
+              ><span>K <code>[T, 4, D]</code></span> <span>V <code>[T, D]</code></span
+              ><span>&beta; <code>[T, 4]</code></span
+              ><span>X&prime; <code>[T, 4, D]</code></span>
+            </div>
+            <div class="engram-equation-grid">
+              <div class="engram-equation-part" style="--accent: var(--gold)">
+                <h4>1. Project four keys and one value</h4>
+                <div class="engram-math" role="math" aria-label="Concatenated flat keys and value equal E times the transpose of W k v">
+                  <span>[K<sub>flat</sub>, V] =</span><span>E W<sub>kv</sub><sup>T</sup></span>
+                </div>
+                <p><code>Wkv [5D, 6144] = [25600, 6144]</code></p>
+                <p class="note">
+                  E concatenates 24 fetched 256-channel vectors. Split the projection into K<sub>flat</sub> <code>[T, 4D]</code> and V
+                  <code>[T, D]</code>, then reshape the keys to <code>[T, 4, D]</code>. Each stream has its own compatibility key K; all four streams
+                  share the same value V.
+                </p>
+              </div>
+              <div class="engram-equation-part" style="--accent: var(--vision)">
+                <h4>2. Score memory against each stream</h4>
+                <div class="engram-math" role="math" aria-label="q for token t and stream r is RMSNorm q applied to X for that token and stream">
+                  <span>q<sub>t,r</sub> =</span><span>RMSNorm<sub>q</sub>(X<sub>t,r</sub>)</span>
+                </div>
+                <div class="engram-math" role="math" aria-label="k for token t and stream r is RMSNorm k applied to its projected key">
+                  <span>k<sub>t,r</sub> =</span><span>RMSNorm<sub>k</sub>(K<sub>t,r</sub>)</span>
+                </div>
+                <div
+                  class="engram-math"
+                  role="math"
+                  aria-label="s for token t and stream r is the dot product of q and k divided by the square root of D"
+                >
+                  <span>s<sub>t,r</sub> =</span><span>&lang;q<sub>t,r</sub>, k<sub>t,r</sub>&rang; / &radic;D</span>
+                </div>
+                <p class="note">
+                  Normalize each stream separately over its D hidden features. The learned <code>q_weight</code> and <code>k_weight</code> each have
+                  shape <code>[4, D]</code>. The dot product reduces D features to one compatibility score per token and stream:
+                  <code>s [T, 4]</code>.
+                </p>
+              </div>
+              <div class="engram-equation-part" style="--accent: var(--encoder)">
+                <h4>3. Turn each score into a gate</h4>
+                <div class="engram-math" role="math" aria-label="z is the square root of the maximum of absolute s and delta, with the sign of s">
+                  <span>z<sub>t,r</sub> = copysign(</span><span>&radic;max(|s<sub>t,r</sub>|, &delta;),</span><span>s<sub>t,r</sub>)</span>
+                </div>
+                <div class="engram-math" role="math" aria-label="beta for token t and stream r is sigmoid of z for that token and stream">
+                  <span>&beta;<sub>t,r</sub> = &sigma;(z<sub>t,r</sub>)</span>
+                </div>
+                <p class="note">
+                  <code>copysign</code> gives the square root the sign of s; &delta; = 10<sup>&minus;6</sup> is the reference clamp. Sigmoid
+                  &sigma;(z) = 1 / (1 + exp(&minus;z)) maps this signed score to a gate between 0 and 1. There are four scalar gates per token,
+                  <code>&beta; [T, 4]</code>.
+                </p>
+              </div>
+              <div class="engram-equation-part engram-residual-equation" style="--accent: var(--residual)">
+                <h4>4. Add the gated value to the residual</h4>
+                <div
+                  class="engram-math"
+                  role="math"
+                  aria-label="Updated X for token t and stream r equals original X plus the text mask times beta times the shared value"
+                >
+                  <span>X&prime;<sub>t,r</sub> =</span><span>X<sub>t,r</sub> +</span><span>m<sub>t</sub> &beta;<sub>t,r</sub> V<sub>t</sub></span>
+                </div>
+                <p>
+                  <code>gate [T, 4, 1] &times; value [T, 1, D]<br />&rarr; addition [T, 4, D]</code>
+                </p>
+                <p class="note">
+                  m<sub>t</sub> is 1 for text and 0 for image positions. For each stream, its gate scales all D components of the shared V, and that
+                  vector is added to the original X. The four-stream shape is preserved. Image positions receive zero addition.
+                </p>
+              </div>
+            </div>
+            <details class="engram-normalization">
+              <summary>Expand the RMSNorm used by the gate</summary>
+              <div
+                class="engram-math"
+                role="math"
+                aria-label="RMSNorm gamma of a vector u is gamma times u divided by the square root of the mean of squared u plus epsilon"
+              >
+                <span>RMSNorm<sub>&gamma;</sub>(u) =</span><span>(&gamma; &odot; u) /</span><span>&radic;(mean(u<sup>2</sup>) + &epsilon;)</span>
+              </div>
+              <p class="note">
+                The mean is over the D features of one token and one stream; &gamma; supplies learned feature scales. The reference computes the score
+                and gate in FP32 and folds the two normalization scales into an elementwise product during the dot product.
+              </p>
+            </details>
+            <p class="note">
+              <strong>Scalar example:</strong> if one residual component is 2, the matching value component is 5, and this stream's gate is 0.60, the
+              updated component is 2 + 0.60 &times; 5 = 5. Each of the other streams uses its own gate with that same value component.
+            </p>
+            <p class="note">
+              <strong>Placement:</strong> X&prime; enters the layer's attention mHC coefficient predictor and
+              <a href="#mhc-equations">four-to-one input mix</a>. Attention and MoE then perform their usual mHC residual updates. Engram's &beta; is
+              its own contextual gate; mHC uses its separate A/B/C coefficients.
+            </p>
+          </article>
           <div class="reading-notes">
             <article class="reading-note" style="--accent: var(--gold)">
               <h3>Capacity grows faster than arithmetic</h3>
@@ -761,7 +866,12 @@
           <p class="source-note">
             <a href="https://arxiv.org/html/2609.19969v1#S2.SS4.SSS2">Report &sect;2.4.2</a>,
             <a href="https://arxiv.org/html/2609.19969v1#S3.SS1.SSS3">&sect;3.1.3</a>, and
-            <a href="https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash/blob/main/inference/engram.py">Engram addressing code</a>.
+            <a href="https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash/blob/main/inference/engram.py">Engram addressing code</a>. The explicit
+            gate and residual equations follow
+            <a href="https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash/blob/314113f8a7dadb388215396ba5fbee2c610a04d6/inference/model.py#L353"
+              >Engram.forward</a
+            >
+            in the released reference.
           </p>
         </section>
 

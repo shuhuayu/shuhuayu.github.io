@@ -75,7 +75,7 @@
                 code: "Engram.forward",
                 params: 2 * S.hcCopies * D,
                 weights: "q_weight and k_weight: 2 × [4, 5120]",
-                info: "Normalized hidden/key compatibility passes through a signed square root and sigmoid. Each stream gets its own gate. Image positions receive no contribution.",
+                info: "Normalize the hidden state and projected key independently over the 5120 features of each stream. Their scaled dot product produces scores [T, 4]; a signed square root and sigmoid produce gates [T, 4]. Add each gate times the shared value [T, 5120] to its residual stream before the attention mHC pass. Image positions receive zero addition.",
                 backward: "Incoming hidden states, projected keys/value, and gate intermediates.",
               }),
             ],
@@ -486,6 +486,11 @@
       ${
         ["input_mix", "mhc_coeff", "sinkhorn", "attention_merge", "ffn_mix", "ffn_merge"].includes(op.id)
           ? '<p class="note"><a href="#mhc-equations">Read the A/B/C mixing equations &darr;</a></p>'
+          : ""
+      }
+      ${
+        ["engram_lookup", "engram_project", "engram_gate"].includes(op.id)
+          ? '<p class="note"><a href="#engram-equations">Read the Engram gate and residual equations &darr;</a></p>'
           : ""
       }
       <a class="note" href="${flowView === "overview" ? "#flow-overview" : "#operation-" + op.id}">${

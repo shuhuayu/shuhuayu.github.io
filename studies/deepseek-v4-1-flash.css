@@ -726,22 +726,26 @@ input[type="range"] {
   font-size: 12px;
   overflow-wrap: anywhere;
 }
-.mhc-equations {
+.mhc-equations,
+.engram-equations {
   margin-top: 24px;
   padding: 24px;
 }
-.mhc-equations h4 {
+.mhc-equations h4,
+.engram-equations h4 {
   margin: 0 0 12px;
   font-size: 14px;
   line-height: 1.4;
 }
-.mhc-shapes {
+.mhc-shapes,
+.engram-shapes {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
   margin: 18px 0;
 }
-.mhc-shapes span {
+.mhc-shapes span,
+.engram-shapes span {
   padding: 7px 10px;
   border: 1px solid var(--line);
   border-radius: 6px;
@@ -749,13 +753,15 @@ input[type="range"] {
   font-size: 12px;
 }
 .mhc-equation-grid,
-.mhc-sublayer-grid {
+.mhc-sublayer-grid,
+.engram-equation-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 14px;
 }
 .mhc-equation-part,
-.mhc-sublayer {
+.mhc-sublayer,
+.engram-equation-part {
   min-width: 0;
   padding: 16px;
   border: 1px solid var(--line);
@@ -763,17 +769,21 @@ input[type="range"] {
   background: var(--card);
   break-inside: avoid;
 }
-.mhc-equation-part {
+.mhc-equation-part,
+.engram-equation-part {
   border-top: 3px solid var(--accent);
 }
-.mhc-equation-part h4 {
+.mhc-equation-part h4,
+.engram-equation-part h4 {
   color: var(--accent);
 }
 .mhc-math,
-.mhc-expanded {
+.mhc-expanded,
+.engram-math {
   font-family: "Cambria Math", "STIX Two Math", Georgia, serif;
 }
-.mhc-math {
+.mhc-math,
+.engram-math {
   display: flex;
   flex-wrap: wrap;
   gap: 0 7px;
@@ -781,7 +791,8 @@ input[type="range"] {
   font-size: 21px;
   line-height: 1.7;
 }
-.mhc-math span {
+.mhc-math span,
+.engram-math span {
   white-space: nowrap;
 }
 .mhc-expanded {
@@ -798,8 +809,27 @@ input[type="range"] {
 .mhc-equations .mhc-block-title {
   margin: 24px 0 14px;
 }
-.mhc-sublayer-grid {
+.mhc-sublayer-grid,
+.engram-equation-grid {
   grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.engram-residual-equation {
+  background: var(--residual-soft);
+}
+.engram-normalization {
+  margin: 18px 0;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--paper-deep);
+}
+.engram-normalization summary {
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 650;
+}
+.engram-normalization .note {
+  margin-bottom: 0;
 }
 .mhc-carry-note {
   margin-bottom: 0;
@@ -2023,7 +2053,8 @@ td:first-child {
 }
 @media (max-width: 760px) {
   .mhc-equation-grid,
-  .mhc-sublayer-grid {
+  .mhc-sublayer-grid,
+  .engram-equation-grid {
     grid-template-columns: 1fr;
   }
   .attention-range-row {
@@ -2096,7 +2127,8 @@ td:first-child {
   }
 }
 @media (max-width: 520px) {
-  .mhc-equations {
+  .mhc-equations,
+  .engram-equations {
     padding: 16px;
   }
   .attention-range {
@@ -2376,13 +2408,15 @@ td:first-child {
   .block-overview,
   .flow-diagram,
   .ownership-card,
-  .mhc-equations {
+  .mhc-equations,
+  .engram-equations {
     break-inside: auto;
   }
   .mhc-equation-grid {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
-  .mhc-sublayer-grid {
+  .mhc-sublayer-grid,
+  .engram-equation-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
   .execution-grid {
