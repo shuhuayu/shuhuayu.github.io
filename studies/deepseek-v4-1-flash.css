@@ -335,6 +335,84 @@ p {
   background: var(--residual-soft);
   color: var(--residual);
 }
+.attention-range {
+  margin: 22px 0 0;
+  padding: 22px;
+}
+.attention-range .legend {
+  margin: 16px 0;
+}
+.attention-range-row {
+  display: grid;
+  grid-template-columns: 100px repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  align-items: center;
+  padding: 18px 0;
+  border-top: 1px solid var(--line);
+}
+.attention-range-layer strong,
+.attention-range-layer small,
+.attention-range-heading {
+  display: block;
+}
+.attention-range-layer strong {
+  font-size: 18px;
+}
+.attention-range-layer small,
+.attention-range-history small,
+.attention-range-local small {
+  color: var(--muted);
+  font-size: 11px;
+}
+.attention-range-history,
+.attention-range-local {
+  min-width: 0;
+  padding: 12px;
+  border-radius: 8px;
+}
+.attention-range-history {
+  border: 1px dashed var(--line-strong);
+}
+.attention-range-local {
+  border: 1px solid var(--vision);
+  background: var(--vision-soft);
+}
+.attention-range-heading {
+  margin-bottom: 8px;
+  font-size: 12px;
+}
+.attention-range-local .attention-range-heading {
+  color: var(--vision);
+}
+.attention-range-cells {
+  display: grid;
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+  gap: 4px;
+  margin-bottom: 6px;
+}
+.attention-range-cells i {
+  display: grid;
+  place-items: center;
+  height: 26px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  background: var(--paper-deep);
+  font-size: 12px;
+  font-style: normal;
+  font-weight: 750;
+}
+.attention-range-cells .selected {
+  border: 2px solid var(--gold);
+  background: var(--gold-soft);
+}
+.attention-range-local .attention-range-cells i {
+  border-color: var(--vision);
+  background: var(--vision);
+  color: var(--card);
+}
+.attention-range-local .attention-range-cells .query {
+  border: 2px solid var(--ink);
+}
 .legend {
   display: flex;
   flex-wrap: wrap;
@@ -647,6 +725,84 @@ input[type="range"] {
   font-family: ui-monospace, monospace;
   font-size: 12px;
   overflow-wrap: anywhere;
+}
+.mhc-equations {
+  margin-top: 24px;
+  padding: 24px;
+}
+.mhc-equations h4 {
+  margin: 0 0 12px;
+  font-size: 14px;
+  line-height: 1.4;
+}
+.mhc-shapes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 18px 0;
+}
+.mhc-shapes span {
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--paper-deep);
+  font-size: 12px;
+}
+.mhc-equation-grid,
+.mhc-sublayer-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+}
+.mhc-equation-part,
+.mhc-sublayer {
+  min-width: 0;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--card);
+  break-inside: avoid;
+}
+.mhc-equation-part {
+  border-top: 3px solid var(--accent);
+}
+.mhc-equation-part h4 {
+  color: var(--accent);
+}
+.mhc-math,
+.mhc-expanded {
+  font-family: "Cambria Math", "STIX Two Math", Georgia, serif;
+}
+.mhc-math {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 7px;
+  margin: 12px 0;
+  font-size: 21px;
+  line-height: 1.7;
+}
+.mhc-math span {
+  white-space: nowrap;
+}
+.mhc-expanded {
+  font-size: 17px;
+  line-height: 1.8;
+}
+.mhc-residual-equation {
+  margin-top: 16px;
+  padding: 16px;
+  border: 1px solid var(--residual);
+  border-radius: 8px;
+  background: var(--residual-soft);
+}
+.mhc-equations .mhc-block-title {
+  margin: 24px 0 14px;
+}
+.mhc-sublayer-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.mhc-carry-note {
+  margin-bottom: 0;
 }
 .ced-layout {
   display: grid;
@@ -1866,6 +2022,19 @@ td:first-child {
   }
 }
 @media (max-width: 760px) {
+  .mhc-equation-grid,
+  .mhc-sublayer-grid {
+    grid-template-columns: 1fr;
+  }
+  .attention-range-row {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .attention-range-layer {
+    grid-column: 1 / -1;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
   .cost-grid,
   .execution-grid,
   .closing-notes {
@@ -1927,6 +2096,16 @@ td:first-child {
   }
 }
 @media (max-width: 520px) {
+  .mhc-equations {
+    padding: 16px;
+  }
+  .attention-range {
+    padding: 16px;
+  }
+  .attention-range-row {
+    grid-template-columns: 1fr;
+    gap: 10px;
+  }
   .baseline,
   .walkthrough,
   .selection-example,
@@ -2196,8 +2375,15 @@ td:first-child {
   }
   .block-overview,
   .flow-diagram,
-  .ownership-card {
+  .ownership-card,
+  .mhc-equations {
     break-inside: auto;
+  }
+  .mhc-equation-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+  .mhc-sublayer-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
   .execution-grid {
     grid-template-columns: repeat(3, minmax(0, 1fr));

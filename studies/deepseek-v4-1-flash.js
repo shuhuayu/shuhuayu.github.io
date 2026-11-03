@@ -118,7 +118,7 @@
               params: 27,
               weights: "24 base values + 3 scale values",
               precision: "FP32 coefficient arithmetic",
-              info: "B and C combine the attention output below. The newly predicted A is carried forward to the FFN input mix.",
+              info: "B mixes the incoming four residual streams; C distributes the attention output at the merge. The newly predicted A mixes the updated streams into the FFN input. Attention here uses A carried from the preceding FFN.",
               backward: "Coefficient logits, scaling values, and Sinkhorn intermediates or their recomputation.",
             }),
           ],
@@ -160,12 +160,12 @@
         info: `Local KV is generated from ${current}'s incoming dense state, ultimately from ${inputSource}. It is specific to this layer.`,
         backward: "Current dense input and weights; local attention contributes gradients through this projection.",
       }),
-      node("local_cache", "RMSNorm + RoPE + local cache", "[min(N, 128), 512]", {
+      node("local_cache", "RMSNorm + RoPE + local cache", "new KV [T, 512]; valid cache [min(N, 128), 512]", {
         code: "Attention._window_kv",
         params: K,
         weights: "[512] RMSNorm scale",
         precision: "FP8 cache; quantized after RoPE",
-        info: "Store one shared latent per position in this layer's 128-token local window. All 40 layers own a separate local cache.",
+        info: "The preceding projection maps [T, 5120] to [T, 512]. KV RMSNorm preserves that shape, then RoPE rotates the last 64 channels and FP8 quantization preserves the 512 features. Each position has one KV latent shared by all 64 query heads within this layer. Prefill computes KV for all T positions; causal window indices let each query read up to 128 recent positions. Only the latest 128 rows are retained for decoding, and a new token updates one row. T is the number of positions processed in this forward; N is the total history length. The ring buffer has 128 slots, with min(N, 128) valid rows. All 40 layers own separate local caches.",
         backward:
           "In training, token activations and quantization-aware intermediates are needed; inference ring-buffer state is a separate concern.",
       }),
@@ -354,7 +354,7 @@
             }),
             node("attention_merge", "mHC residual / output merge", "[T, 4, 5120]", {
               code: "hc_post",
-              info: "Use the current B residual matrix and C output coefficients to combine the original four streams and the dense attention output.",
+              info: "B_attn mixes the incoming four streams; C_attn scales and distributes the attention output. Their sum gives the four updated streams that feed the FFN input mix.",
               backward: "Original residual, dense attention output, and B/C coefficients.",
             }),
           ],
@@ -462,7 +462,7 @@
         }),
         node("ffn_merge", "mHC merge / carry A to next block", "[T, 4, 5120] + next input mix [T, 4]", {
           code: "hc_post / Block.forward return",
-          info: "Combine the dense FFN output with the four residual streams. Return the FFN's A coefficients for the following block or final head merge.",
+          info: "B_ffn mixes the post-attention residual streams; C_ffn scales and distributes the MoE output. Return A_ffn for the next layer's attention input or the final head merge.",
           backward: "Residual and FFN outputs, current B/C, and the carried A dependency into the next block.",
         }),
       ],
@@ -483,6 +483,11 @@
       <dt>Reference path</dt><dd><code>${escape(op.code)}</code></dd>
       <dt>Backward dependencies</dt><dd>${escape(op.backward)}</dd></dl>
       <p class="note">Shared cache size and owned weight count are separate. Training needs saved intermediates or their recomputation.</p>
+      ${
+        ["input_mix", "mhc_coeff", "sinkhorn", "attention_merge", "ffn_mix", "ffn_merge"].includes(op.id)
+          ? '<p class="note"><a href="#mhc-equations">Read the A/B/C mixing equations &darr;</a></p>'
+          : ""
+      }
       <a class="note" href="${flowView === "overview" ? "#flow-overview" : "#operation-" + op.id}">${
         flowView === "overview" ? "Back to the block overview" : "Back to this operation"
       } &uarr;</a>`;
@@ -586,7 +591,7 @@
         }
         <div class="block-coefficient-note"><strong>Coefficients predicted alongside the dense path</strong>
           <p>Each sublayer predicts B/C for its own merge and A for the following sublayer. The input mix shown at its entrance is already carried in.</p>
-          <a href="#mhc">Open Single-Pass mHC &rarr;</a></div>
+          <a href="#mhc-equations">Read the A/B/C mixing equations &darr;</a></div>
         <div class="component-insets"><span class="label">Open a component</span><a href="#expert">SwiGLU expert &rarr;</a><a href="#fp4">FP4 cache &rarr;</a>
           <a href="#vision">Vision &rarr;</a><a href="#dspark">DSpark &rarr;</a></div>
         ${
