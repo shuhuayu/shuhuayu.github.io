@@ -1,0 +1,684 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="robots" content="noindex, follow" />
+    <meta
+      name="description"
+      content="A theoretical memory study of Qwen3.8-Flash-Next training on 16 GB300 GPUs: FP32 master weights, Muon and Adam state, the row-owned PLE table, FSDP, expert and pipeline parallelism, Dist-MoE activation slots, and full layer recompute."
+    />
+    <link rel="canonical" href="https://shuhuayu.github.io/studies/qwen3-8-flash-next-memory.html" />
+    <title>Memory: Qwen3.8-Flash-Next on 16 GB300s</title>
+    <link rel="stylesheet" href="./qwen3-8-flash-next-memory.css?v=memory-1" />
+    <link rel="stylesheet" href="./qwen3-8-flash-next-series.css?v=memory-1" />
+    <script src="./qwen3-8-flash-next-accounting.js?v=memory-1" defer></script>
+    <script src="./qwen3-8-flash-next-memory-model.js?v=memory-1" defer></script>
+    <script src="./qwen3-8-flash-next-memory.js?v=memory-1" defer></script>
+  </head>
+  <body>
+    <main class="page">
+      <nav class="series" aria-label="Qwen3.8-Flash-Next series">
+        <a href="../blogs/">Blogs</a>
+        <a href="./qwen3-8-flash-next.html">01 / Architecture</a>
+        <a href="./qwen3-8-flash-next-memory.html" aria-current="page">02 / Memory</a>
+        <a href="./qwen3-8-flash-next-roofline.html">03 / Roofline</a>
+        <div class="series-actions">
+          <button id="theme-toggle" type="button">Dark</button>
+        </div>
+      </nav>
+      <header>
+        <div class="eyebrow">Qwen3.8-Flash-Next studies / 02</div>
+        <h1>Memory: Qwen3.8-Flash-Next<br />on 16 GB300s</h1>
+        <p class="dek">
+          A 125B-A6B decoder with a 51-billion-parameter lookup table. The table is free to compute and expensive to keep. The question is which GPU
+          keeps it, and what else is live there at the same time.
+        </p>
+        <div class="headline-stats">
+          <div><strong>176.94B</strong><span>trainable text-decoder parameters</span></div>
+          <div><strong>16</strong><span>GB300 GPUs, one NVLink domain</span></div>
+          <div><strong>288 GiB</strong><span>HBM3e per GPU (eight 36-GiB stacks)</span></div>
+          <div><strong id="hero-bill">2.13 TiB</strong><span>logical FP32 update state</span></div>
+        </div>
+        <p class="scope">
+          Anchor recipe: PP2 with interleaved 1F1B and two virtual stages per rank, DP-shard8 / EP8 / TP1 / CP1, 16 microbatches of 16,384 packed
+          tokens per DP rank (documents split at 4K), full layer recompute, Dist-MoE with an activation-slot capacity factor of 0.5, DistMuon plus
+          AdamW plus Adam for the PLE table, FP32 master weights and gradient reduction, BF16 compute. No vision encoder, no MTP head. Every number on
+          this page is derived from shapes, dtypes and schedules; none is measured.
+        </p>
+        <nav class="jump-links" aria-label="Sections">
+          <a href="#precision">Precision policy</a><a href="#state">The state bill</a><a href="#ownership">Ownership</a><a href="#lab">Memory lab</a
+          ><a href="#tensors">Tensor anatomy</a><a href="#workspaces">Temporary memory</a><a href="#pipeline">Pipeline lifetimes</a
+          ><a href="#fitdeck">Fitting it</a><a href="#notes">Notes</a>
+        </nav>
+      </header>
+
+      <section id="precision">
+        <div class="eyebrow">First, name the copies</div>
+        <h2>FP32 history, BF16 compute, and one table without a BF16 view</h2>
+        <p>
+          The FSDP storage shard <em>is</em> the master weight: the optimizer updates it in FP32, and FSDP casts a BF16 compute view for forward and
+          backward. There is no second, full-model BF16 master. The PLE n-gram table is the exception that shapes this whole study: FSDP ignores it,
+          so it never gets a BF16 view. Each data-parallel rank owns a contiguous range of rows in FP32 and only the rows a microbatch looks up are
+          cast to BF16.
+        </p>
+        <div class="precision-flow" aria-label="Training precision flow">
+          <div><b>Resident master</b><strong>FP32</strong><small>FSDP shard, EP-local experts, owned table rows</small></div>
+          <span aria-hidden="true">&#8594;</span>
+          <div><b>Compute view</b><strong>BF16</strong><small>Gathered dense and expert weights; table rows only per lookup</small></div>
+          <span aria-hidden="true">&#8594;</span>
+          <div><b>Gradient history</b><strong>FP32</strong><small>Reduce-scatter in FP32; table gradients stay on the row owner</small></div>
+          <span aria-hidden="true">&#8594;</span>
+          <div><b>Optimizer state</b><strong>FP32</strong><small>One Muon momentum, or two Adam/AdamW moments</small></div>
+        </div>
+        <aside class="callout">
+          <strong>Precision is per role, not per model.</strong> DistMuon runs its Newton&ndash;Schulz iteration on a BF16 working copy. GDN keeps its
+          recurrent state arithmetic in FP32, and the QSA indexer's KL target is accumulated in FP32. None of that makes the model GEMMs FP32.
+        </aside>
+        <div class="table-scroll">
+          <table>
+            <thead>
+              <tr>
+                <th>Object</th>
+                <th>Dtype</th>
+                <th>Lifetime / ownership</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Dense resident parameter</td>
+                <td>FP32</td>
+                <td>Sharded over the 8 DP ranks of its pipeline stage</td>
+              </tr>
+              <tr>
+                <td>Routed expert parameter</td>
+                <td>FP32</td>
+                <td>64 of 512 experts per EP rank; expert FSDP degree 8 / 8 = 1</td>
+              </tr>
+              <tr>
+                <td>PLE table rows</td>
+                <td>FP32</td>
+                <td>40,000,192 rows per owner on the stage that runs layer 2; ignored by FSDP</td>
+              </tr>
+              <tr>
+                <td>Forward/backward compute view</td>
+                <td>BF16</td>
+                <td>Unsharded over FSDP; under PP it stays live from the first forward to the end of the schedule</td>
+              </tr>
+              <tr>
+                <td>Gradient accumulation and reduction</td>
+                <td>FP32</td>
+                <td>Under PP, dense gradients stay unsharded until the last backward of the schedule</td>
+              </tr>
+              <tr>
+                <td>Muon momentum</td>
+                <td>FP32</td>
+                <td>One tensor with the storage shard's layout</td>
+              </tr>
+              <tr>
+                <td>Adam / AdamW first and second moments</td>
+                <td>FP32</td>
+                <td>Two tensors: the PLE table (Adam, no weight decay) and the AdamW remainder</td>
+              </tr>
+              <tr>
+                <td>Model GEMMs and main activations</td>
+                <td>BF16</td>
+                <td>Four-stream residual <code>[T, 4 &times; 2560]</code>, projections, expert rows</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="state">
+        <div class="eyebrow">The unavoidable bill</div>
+        <h2>A 2.13-TiB bill, and a third of it is one table</h2>
+        <p>
+          The <a href="./qwen3-8-flash-next.html#parameters">architecture study</a> audited 179,999,981,424 checkpoint elements. Remove the
+          448,931,056 vision-encoder and 2,607,150,848 MTP parameters and 176,943,899,520 trainable parameters remain. The recipe's first-match
+          optimizer patterns split them three ways:
+        </p>
+        <div class="table-scroll card">
+          <table id="optimizer-split">
+            <thead>
+              <tr>
+                <th>Optimizer</th>
+                <th>Parameters</th>
+                <th>Share</th>
+                <th>Bytes / parameter</th>
+                <th>FP32 state</th>
+                <th>Share of state</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>DistMuon: projections, shared and routed experts</td>
+                <td>123,003,207,680</td>
+                <td>69.5%</td>
+                <td>12</td>
+                <td>1.342 TiB</td>
+                <td>63.1%</td>
+              </tr>
+              <tr>
+                <td>Adam: the PLE table</td>
+                <td>51,200,245,760</td>
+                <td>28.9%</td>
+                <td>16</td>
+                <td>0.745 TiB</td>
+                <td>35.0%</td>
+              </tr>
+              <tr>
+                <td>AdamW: embeddings, head, routers, gates, mixers, norms, convolutions</td>
+                <td>2,740,446,080</td>
+                <td>1.5%</td>
+                <td>16</td>
+                <td>0.040 TiB</td>
+                <td>1.9%</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="equation-pair">
+          <div class="card">
+            <span class="eyebrow">DistMuon parameter</span><strong>4 + 4 + 4 = 12 bytes</strong>
+            <p>FP32 master + FP32 gradient + FP32 momentum</p>
+          </div>
+          <div class="card">
+            <span class="eyebrow">Adam or AdamW parameter</span><strong>4 + 4 + 4 + 4 = 16 bytes</strong>
+            <p>FP32 master + gradient + two FP32 moments</p>
+          </div>
+        </div>
+        <pre class="formula">
+Update-state tally = 12 P_muon + 16 (P_adam + P_adamw)
+                   = 2,339,089,561,600 bytes
+                   = 2.13 TiB across the logical model
+Ideal 16-way average = 136.15 GiB / GPU</pre
+        >
+        <p>
+          The table is free to compute: a token reads 16 rows of 160 values, 5 KiB in BF16. But every one of its 51.2 billion parameters needs a
+          master, a gradient and two moments, because Adam is applied to the whole table. Sparse access reduces arithmetic, not optimizer state. The
+          same is true of the routed experts: choosing 10 of 512 per token does not shrink their 120.8 billion stored weights.
+        </p>
+        <aside class="callout">
+          <strong>The average hides the hard part.</strong> 136 GiB per GPU would fit easily on a 288-GiB device. But no GPU holds the average: PP
+          gives each rank half the decoder, EP gives each rank 64 experts, and the table lives entirely on the stage that runs layer 2. This tally
+          also excludes BF16 views, unsharded gradients, activations and workspaces.
+        </aside>
+      </section>
+
+      <section id="ownership">
+        <div class="eyebrow">Who holds what</div>
+        <h2>PP, EP, FSDP and row owners divide different things</h2>
+        <div class="parallel-grid four">
+          <article class="card">
+            <span class="eyebrow">PP2 &times; VPP2</span>
+            <h3>Four chunks of 12 layers</h3>
+            <p>
+              Chunk 0 holds the embedding and layers 1&ndash;12, including the PLE layer. Chunk 3 holds layers 37&ndash;48, the final mixer and the LM
+              head. PP rank 0 runs chunks 0 and 2; rank 1 runs chunks 1 and 3.
+            </p>
+          </article>
+          <article class="card">
+            <span class="eyebrow">EP8</span>
+            <h3>64 experts per layer per GPU</h3>
+            <p>
+              512 / 8 = 64. With 8 DP ranks per stage, expert FSDP is 8 / 8 = 1: EP alone divides the expert bank. Each GPU stores 24 layers &times;
+              64 experts of its stage.
+            </p>
+          </article>
+          <article class="card">
+            <span class="eyebrow">FSDP8</span>
+            <h3>Dense weights over 8 ranks</h3>
+            <p>
+              Attention, GDN, shared experts, routers, mixers, embedding and head are sharded over the 8 DP ranks of their stage. They are 2.8% of the
+              parameters, so FSDP barely matters for the state bill here.
+            </p>
+          </article>
+          <article class="card">
+            <span class="eyebrow">Row owners</span>
+            <h3>The table lives on PP rank 0</h3>
+            <p>
+              The 320,001,536 rows are split over the 8 DP ranks that run layer 2: 40,000,192 rows, or 6.4 billion parameters, per GPU. At 16 bytes
+              per parameter that is <strong>95.37 GiB</strong> per rank-0 GPU, and nothing on rank 1.
+            </p>
+          </article>
+        </div>
+        <pre class="formula">
+On PP rank r with dense parameters D_r, routed parameters X_r and table rows P_r:
+Resident parameters / GPU = D_r / 8 + X_r / EP + P_r * 160 / 8
+FP32 state / GPU          = 16 * (Adam + AdamW part) + 12 * (Muon part)
+BF16 views / GPU          = 2 * (D_r + X_r / EP)        # the table has no view</pre
+        >
+        <div class="table-scroll card">
+          <table id="rank-compare">
+            <thead>
+              <tr>
+                <th>Per GPU, after reduction</th>
+                <th>PP rank 0 (chunks 0, 2)</th>
+                <th>PP rank 1 (chunks 1, 3)</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>FP32 master</td>
+                <td>53.13 GiB</td>
+                <td>29.27 GiB</td>
+              </tr>
+              <tr>
+                <td>FP32 Muon momentum</td>
+                <td>28.65 GiB</td>
+                <td>28.63 GiB</td>
+              </tr>
+              <tr>
+                <td>FP32 Adam / AdamW moments</td>
+                <td>48.96 GiB</td>
+                <td>1.28 GiB</td>
+              </tr>
+              <tr>
+                <td>FP32 gradient shards</td>
+                <td>53.13 GiB</td>
+                <td>29.27 GiB</td>
+              </tr>
+              <tr>
+                <td><strong>Update-state tally</strong></td>
+                <td><strong>183.85 GiB</strong></td>
+                <td><strong>88.45 GiB</strong></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          Rank 0 carries 95 GiB more persistent state than rank 1, and the table accounts for all of it. The experts are symmetric: each rank holds 24
+          layers of 64 experts, 28.1 GiB of master and the same of momentum. The pipeline balances layers, not bytes.
+        </p>
+        <aside class="callout">
+          <strong>A 5 KiB lookup behind a 95 GiB parameter.</strong> A microbatch of 16,384 tokens asks for 262,144 table rows. Each hash head reads
+          only its own row range, so an owner receives at most <code>min(T, overlap)</code> distinct IDs per head from one peer. An owner's 40M rows
+          span two full heads and the edge of a third: at most 33,180 IDs per peer, a capacity fixed by the table layout, not the data. All 8 owners'
+          replies fit in 81 MiB of BF16 rows. The table never moves; only IDs and rows do.
+        </aside>
+      </section>
+
+      <section id="lab">
+        <div class="eyebrow">Explore the ownership</div>
+        <h2>A memory lab, with its assumptions exposed</h2>
+        <p>
+          Pick a pipeline rank and a lifecycle phase. The ledger follows the real 48-layer structure: 36 GDN and 12 QSA layers, the PLE layer, the
+          embedding, the final mixer and the LM head. Structural state, schedule-derived activations, the Dist-MoE planner's own buffer formulas and a
+          chosen workspace allowance are kept as separate rows.
+        </p>
+        <form id="memory-controls" class="card controls" onsubmit="return false">
+          <label
+            >GPUs<select id="mem-world">
+              <option selected>16</option>
+              <option>32</option>
+              <option>64</option>
+            </select></label
+          >
+          <label
+            >Pipeline ranks<select id="mem-pp">
+              <option>1</option>
+              <option selected>2</option>
+              <option>4</option>
+            </select></label
+          >
+          <label
+            >Virtual stages per rank<select id="mem-vp">
+              <option>1</option>
+              <option selected>2</option>
+              <option>3</option>
+              <option>4</option>
+            </select></label
+          >
+          <label
+            >Expert parallel degree<select id="mem-ep">
+              <option>1</option>
+              <option>2</option>
+              <option>4</option>
+              <option selected>8</option>
+              <option>16</option>
+              <option>32</option>
+              <option>64</option>
+            </select></label
+          >
+          <label>Pipeline rank<select id="mem-stage"></select></label>
+          <label
+            >Tokens per microbatch per DP rank<select id="mem-tokens">
+              <option>4096</option>
+              <option>8192</option>
+              <option selected>16384</option>
+              <option>32768</option>
+            </select></label
+          >
+          <label
+            >Microbatches / schedule<select id="mem-mbs">
+              <option>4</option>
+              <option>8</option>
+              <option selected>16</option>
+              <option>32</option>
+            </select></label
+          >
+          <label
+            >Dist-MoE activation-slot factor<select id="mem-slot">
+              <option value="0">0 (inputs only, recompute all)</option>
+              <option value="0.25">0.25</option>
+              <option value="0.5" selected>0.5</option>
+              <option value="1">1.0 (save balanced intermediates)</option>
+            </select></label
+          >
+          <label
+            >Dist-MoE scratch factor<select id="mem-scratch">
+              <option value="1">1x balanced</option>
+              <option value="2">2x</option>
+              <option value="4" selected>4x</option>
+              <option value="8">8x</option>
+            </select></label
+          >
+          <label
+            >Lifecycle phase<select id="mem-phase">
+              <option value="forward">First forward: gradients cleared</option>
+              <option value="backward" selected>Schedule steady state</option>
+              <option value="optimizer">After reduction / optimizer</option>
+            </select></label
+          >
+          <label
+            >BF16 view residency<select id="mem-views">
+              <option value="stage" selected>All local chunks (PP default)</option>
+              <option value="chunk">One chunk at a time (optimistic)</option>
+            </select></label
+          >
+          <label
+            >Gradient lifecycle<select id="mem-grad">
+              <option value="deferred" selected>PP: defer reduction to schedule end</option>
+              <option value="reduced">Already reduced shards (optimistic)</option>
+            </select></label
+          >
+          <label
+            >PLE table placement<select id="mem-table">
+              <option value="stage" selected>Rows over the PLE stage's DP ranks</option>
+              <option value="world">Rows over every GPU (alternative design)</option>
+            </select></label
+          >
+          <label
+            >Other workspace allowance<select id="mem-reserve">
+              <option value="0">0 GiB</option>
+              <option value="8" selected>8 GiB</option>
+              <option value="16">16 GiB</option>
+              <option value="24">24 GiB</option>
+            </select></label
+          >
+        </form>
+        <div class="lab-actions">
+          <button type="button" id="memory-reset">Reset to the anchor recipe</button
+          ><button type="button" id="memory-share">Copy this analysis link</button><span id="share-status" role="status"></span>
+        </div>
+        <p id="config-warning" class="warning" role="status" hidden></p>
+        <p class="note" id="layout-note"></p>
+        <div id="stage-map" class="stage-map" aria-label="Select a pipeline rank"></div>
+        <div class="result-grid">
+          <article class="card">
+            <span class="eyebrow">After-reduction update-state tally</span><strong class="big-number" id="state-total">183.85 GiB</strong>
+            <p id="state-detail"></p>
+          </article>
+          <article class="card">
+            <span class="eyebrow">Planning subtotal + chosen allowance</span><strong class="big-number" id="budget-total"></strong>
+            <p id="budget-verdict"></p>
+          </article>
+        </div>
+        <div class="budget-chart card">
+          <div class="chart-title"><strong id="budget-title">Schedule steady-state planning budget</strong><span id="budget-axis"></span></div>
+          <div id="budget-bar" class="budget-bar" aria-label="Memory budget segments"></div>
+          <div id="budget-legend" class="legend"></div>
+          <p class="note">
+            The dashed line is the 288-GiB physical HBM. The CUDA context and driver keep part of it, so the usable budget is smaller. Deferred
+            gradients replace reduced shards in the steady-state phase; they are not added on top of them.
+          </p>
+        </div>
+        <div class="table-scroll card">
+          <table id="memory-ledger">
+            <thead>
+              <tr>
+                <th>Allocation category</th>
+                <th>Modeled size</th>
+                <th>What the number means</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <aside class="callout">
+          <strong>Not a fit guarantee, and not a measurement.</strong> State counts use ideal division without shard padding. Saved activations count
+          every checkpointed four-stream layer input and QSA KL target of each unfinished chunk forward, following the logical PyTorch schedule.
+          Dist-MoE slots and scratch use the backend planner's BF16 formulas. The subtotal adds planning allowances whose individual maxima need not
+          coincide; it is neither an exact peak nor a lower bound on what an implementation allocates.
+        </aside>
+        <noscript><p>Enable JavaScript for the calculator. The fixed formulas and anchor numbers remain readable on this page.</p></noscript>
+      </section>
+
+      <section id="tensors">
+        <div class="eyebrow">Follow the bytes through one layer</div>
+        <h2>What a layer saves, and what it only borrows</h2>
+        <p>
+          With full layer recompute, a layer keeps only its four-stream input until backward. Everything else is regenerated one layer at a time, with
+          two deliberate exceptions: the Dist-MoE call keeps what its slot allows, and the QSA indexer keeps its no-grad KL target instead of redoing
+          the teacher. Sizes follow the lab's tokens per microbatch.
+        </p>
+        <div class="tensor-controls">
+          <label
+            >Layer<select id="tensor-layer">
+              <option value="gdn">GDN layer (36 of 48)</option>
+              <option value="qsa">QSA layer (12 of 48)</option>
+              <option value="ple">Layer 2: GDN + PLE</option>
+              <option value="head">Final mixer + LM head + loss</option>
+            </select></label
+          >
+        </div>
+        <div class="table-scroll card">
+          <table id="tensor-table">
+            <thead>
+              <tr>
+                <th>Tensor</th>
+                <th>Logical shape</th>
+                <th>Dtype</th>
+                <th>Size</th>
+                <th>Lifetime</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <div class="table-scroll card">
+          <table id="param-table">
+            <thead>
+              <tr>
+                <th>Parameter group</th>
+                <th>Shape</th>
+                <th>Parameters</th>
+                <th>Optimizer</th>
+                <th>FP32 master / GPU</th>
+                <th>BF16 view / GPU</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <p class="note">
+          Per-GPU sizes use the lab's EP and FSDP degrees. Fused storage such as <code>[512, 2, 640, 2560]</code> holds two logical Muon matrices per
+          expert; DistMuon orthogonalizes them separately and no extra copy is counted for the view.
+        </p>
+      </section>
+
+      <section id="workspaces">
+        <div class="eyebrow">The allocations a state formula misses</div>
+        <h2>Four temporary-memory stories</h2>
+        <p>
+          These worked sizes follow the lab's token shape. They are separate examples, <strong>not four extra bars</strong>: concurrency, buffer reuse
+          and fusion decide how many are live at once.
+        </p>
+        <div class="workspace-grid">
+          <article class="card">
+            <span class="eyebrow">GDN: training is not inference</span>
+            <h3>Token chunks carry matrix state</h3>
+            <div id="gdn-workspace" class="workspace-values"></div>
+            <p>
+              Decode carries one <code>[48, 128, 128]</code> FP32 state per layer. Chunked training materializes one state per 64-token chunk:
+              <code>ceil(T / 64) &times; 48 &times; 128 &times; 128 &times; 4</code> bytes. Splitting documents at 4K resets the recurrence but not
+              the number of chunks. Full recompute makes this one layer's transient, not a saved tensor.
+            </p>
+          </article>
+          <article class="card">
+            <span class="eyebrow">QSA: selection is data too</span>
+            <h3>Indices and a teacher chunk</h3>
+            <div id="qsa-workspace" class="workspace-values"></div>
+            <p>
+              Each query reads 512 selected blocks of four keys plus up to three tail keys: <code>[T, 2051]</code> int64 indices. The KL teacher
+              gathers those keys for 512 queries at a time and keeps only a <code>[T, 512]</code> FP32 target, which is cheaper to save than to
+              recompute.
+            </p>
+          </article>
+          <article class="card">
+            <span class="eyebrow">Dist-MoE: a planner, not autograd</span>
+            <h3>Slots scale with the capacity factor</h3>
+            <div id="moe-workspace" class="workspace-values"></div>
+            <p>
+              A layer must keep its input <code>[T, D]</code>. Saving everything for balanced routing adds <code>x_gathered</code>,
+              <code>h1</code> and the staged output: <code>R &times; (D + 2F + D) &times; 2</code> bytes with <code>R = 10T</code>. The factor
+              interpolates between the two; overflow is recomputed. Scratch is sized for the worst routed row count the run must tolerate.
+            </p>
+          </article>
+          <article class="card">
+            <span class="eyebrow">Loss: a 248K vocabulary</span>
+            <h3>Never hold the full logits</h3>
+            <div id="loss-workspace" class="workspace-values"></div>
+            <p>
+              A full <code>[T, 248320]</code> logit tensor would rival a whole chunk's saved inputs. The chunked loss computes logits and their
+              gradient one token chunk at a time, so only a slice is ever live. Its saved input is the final <code>[T, 2560]</code> hidden state.
+            </p>
+          </article>
+        </div>
+        <aside class="callout">
+          <strong>BF16 reduction is a communication policy, not a master dtype.</strong> Reducing gradients in BF16 would shrink reduce-scatter
+          payloads, but the master, optimizer-visible gradient and moments would stay FP32. It would not shrink the orange gradient bar.
+        </aside>
+      </section>
+
+      <section id="pipeline">
+        <div class="eyebrow">Memory follows lifetime, not global batch</div>
+        <h2>16 microbatches do not mean 16 saved forwards</h2>
+        <p>
+          A forward adds one saved set for its chunk; the matching backward releases it. With interleaving, a rank alternates between its two chunks,
+          and its warmup decides how many forwards are unfinished at once. In PyTorch's interleaved 1F1B with PP2, VPP2 and 16 microbatches, rank 0
+          warms up with 4 forwards and peaks at <strong>5</strong> unfinished chunk forwards; rank 1 peaks at <strong>3</strong>.
+        </p>
+        <pre class="formula">
+Interleaved 1F1B warmup on rank r = (VPP - 1) * (M / rounds) + 2 * (PP - 1 - r),   rounds = floor(M / PP)
+Peak unfinished chunk forwards    = warmup + 1   (when M is large enough)
+Saved per chunk forward           = 12 * T * 10240 * 2  +  3 * T * 512 * 4   bytes
+Dist-MoE slots                    = peak unfinished chunk forwards (one 12-layer slot each)</pre
+        >
+        <div class="card schedule-card">
+          <div class="chart-title"><strong>Unfinished chunk forwards by logical action</strong><span id="schedule-axis"></span></div>
+          <div id="schedule-chart" class="schedule-chart" aria-label="Live chunk forwards over the schedule"></div>
+          <div id="schedule-legend" class="legend"></div>
+          <p class="note">
+            The horizontal axis is the order of forward and backward actions on each rank, not elapsed time. No overlap or speed is inferred.
+          </p>
+        </div>
+        <div class="table-scroll card">
+          <table id="schedule-compare">
+            <thead>
+              <tr>
+                <th>Schedule</th>
+                <th>Layers per chunk</th>
+                <th>Peak chunk forwards (rank 0 / last)</th>
+                <th>Saved inputs, rank 0</th>
+                <th>Dist-MoE slots, rank 0</th>
+                <th>Nominal bubble</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <p>
+          Interleaving halves the nominal bubble, from <code>(PP &minus; 1) / M</code> to <code>(PP &minus; 1) / (M &times; VPP)</code>, but it does
+          not halve activation memory: rank 0 holds five 12-layer chunk forwards instead of two 24-layer stage forwards, 60 layers of saved inputs
+          instead of 48. And the stage boundary packet is the whole four-stream state: <code>[16384, 10240]</code> BF16, 320 MiB per microbatch per
+          hop forward, with a matching gradient backward. VPP2 has three hops per microbatch instead of one.
+        </p>
+      </section>
+
+      <section id="fitdeck">
+        <div class="eyebrow">An interactive fitting walkthrough</div>
+        <h2>From a 2.13-TiB bill to one 288-GiB GPU</h2>
+        <p>
+          Each step changes one ownership or activation assumption for the most loaded GPU. The FP32-master / FP32-state / BF16-compute policy is kept
+          throughout. Bars use a logarithmic axis; add the numbers, not the bar lengths.
+        </p>
+        <article class="card deck">
+          <div class="deck-toolbar">
+            <button id="deck-prev" type="button" aria-label="Previous step">&#8592;</button><span id="deck-position"></span
+            ><button id="deck-next" type="button" aria-label="Next step">&#8594;</button>
+          </div>
+          <h3 id="deck-title"></h3>
+          <p id="deck-description"></p>
+          <div id="deck-bars" class="log-bars"></div>
+          <div class="log-axis"><span>1 MiB</span><span>1 GiB</span><span>64 GiB</span><span>64 TiB</span></div>
+          <p id="deck-total" class="deck-total"></p>
+          <button type="button" id="deck-apply">Explore this step in the memory lab</button>
+        </article>
+        <h3>What would make rank 0 fit?</h3>
+        <p>
+          The anchor's rank-0 planning budget exceeds 288 GiB while rank 1 sits far below it. Each lever below changes one input of the anchor and
+          recomputes the rank-0 budget. They are accounting alternatives, not validated recipes.
+        </p>
+        <div class="table-scroll card">
+          <table id="lever-table">
+            <thead>
+              <tr>
+                <th>Change from the anchor</th>
+                <th>Rank-0 budget</th>
+                <th>Last-rank budget</th>
+                <th>What it trades</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="notes" class="sources">
+        <h2>Sources and accounting notes</h2>
+        <ul>
+          <li>
+            <a href="https://huggingface.co/Qwen/Qwen3.8-Flash-Next">Qwen3.8-Flash-Next</a> released configuration and the checkpoint shape audit in
+            <a href="./qwen3-8-flash-next.html">study 01</a>: logical dimensions and parameter counts.
+          </li>
+          <li>
+            TorchTitan's Flash-Next model and recipe (<code>torchtitan/models/qwen3_8_flash_next</code>,
+            <code>torchtitan_recipes/models/qwen3_8_flash_next.py</code>): parameter shapes, the optimizer patterns, the row-owned table and the fixed
+            PLE request capacity.
+          </li>
+          <li>
+            PyTorch <code>torch.distributed.pipelining</code>: the interleaved 1F1B action order, and <code>PipelineStage</code> disabling FSDP
+            gradient sync and resharding until the last backward of a schedule. TorchTitan keeps <code>reshard_after_forward</code> off under PP by
+            default.
+          </li>
+          <li>Dist-MoE's BF16 activation-buffer planner: minimum and balanced full-save slot sizes, and the recompute-mode backward scratch.</li>
+          <li>Presentation follows the <a href="./kimi-k3-memory.html">Kimi K3 memory study</a>.</li>
+        </ul>
+        <p>
+          GiB = 2<sup>30</sup> bytes; TiB = 2<sup>40</sup> bytes. Shards are modeled by ideal division without per-tensor padding. Decoder layers are
+          split equally across <code>PP &times; VPP</code> chunks in loop order (chunk <code>i</code> on rank <code>i mod PP</code>), with the
+          embedding on the first chunk and the final mixer and LM head on the last. The table's row owners are the DP ranks of the stage running layer
+          2; the "every GPU" placement is a hypothetical alternative. The PLE lookup output, router statistics, the indexer's own activations and FSDP
+          communication buffers are omitted from saved activations and covered only by the workspace allowance. No measured run, profile or cluster
+          information is used.
+        </p>
+        <nav class="series-footer" aria-label="Related studies">
+          <a href="./qwen3-8-flash-next.html">&#8592; Previous: Study 01 &mdash; Architecture</a>
+          <a href="./qwen3-8-flash-next-roofline.html">Next: Study 03 &mdash; Roofline &#8594;</a>
+        </nav>
+      </section>
+    </main>
+  </body>
+</html>

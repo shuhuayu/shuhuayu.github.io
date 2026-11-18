@@ -1,0 +1,477 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="robots" content="noindex, follow" />
+    <meta
+      name="description"
+      content="An analytic roofline for Qwen3.8-Flash-Next training on 16 GB300 GPUs: activated FLOPs, sparse attention and recurrent cores, expert and lookup traffic, FSDP and pipeline costs, and the DistMuon update."
+    />
+    <link rel="canonical" href="https://shuhuayu.github.io/studies/qwen3-8-flash-next-roofline.html" />
+    <title>Roofline: Qwen3.8-Flash-Next on 16 GB300s</title>
+    <link rel="stylesheet" href="./qwen3-8-flash-next-memory.css?v=roofline-1" />
+    <link rel="stylesheet" href="./qwen3-8-flash-next-series.css?v=roofline-1" />
+    <link rel="stylesheet" href="./qwen3-8-flash-next-roofline.css?v=roofline-1" />
+    <script src="./qwen3-8-flash-next-accounting.js?v=roofline-1" defer></script>
+    <script src="./qwen3-8-flash-next-roofline-model.js?v=roofline-1" defer></script>
+    <script src="./qwen3-8-flash-next-roofline.js?v=roofline-1" defer></script>
+  </head>
+  <body>
+    <main class="page">
+      <nav class="series" aria-label="Qwen3.8-Flash-Next series">
+        <a href="../blogs/">Blogs</a>
+        <a href="./qwen3-8-flash-next.html">01 / Architecture</a>
+        <a href="./qwen3-8-flash-next-memory.html">02 / Memory</a>
+        <a href="./qwen3-8-flash-next-roofline.html" aria-current="page">03 / Roofline</a>
+        <div class="series-actions">
+          <button id="theme-toggle" type="button">Dark</button>
+        </div>
+      </nav>
+      <header>
+        <div class="eyebrow">Qwen3.8-Flash-Next studies / 03</div>
+        <h1>Roofline: Qwen3.8-Flash-Next<br />on 16 GB300s</h1>
+        <p class="dek">
+          Six billion activated parameters per token, 51 billion that cost no FLOPs at all, and a router that sends ten copies of every token across
+          NVLink. This study turns the shapes from study 01 and the lifetimes from study 02 into an analytic ceiling for one recipe.
+        </p>
+        <div class="headline-stats">
+          <div><strong>6.67B</strong><span>activated parameters per token</span></div>
+          <div><strong>42.39</strong><span>model GFLOP per token (TorchTitan convention)</span></div>
+          <div><strong id="hero-tps">30,457</strong><span>recipe roofline, tokens/s/GPU</span></div>
+          <div><strong id="hero-tflops">1,291</strong><span>model TFLOP/s/GPU at that ceiling</span></div>
+        </div>
+        <p class="scope">
+          Anchor recipe, as in study 02: 16 GB300s in one NVLink domain, PP2 with interleaved 1F1B and two virtual stages, DP-shard8 / EP8, 16
+          microbatches of 16,384 packed tokens per DP rank in 4K documents, full layer recompute, Dist-MoE with slot factor 0.5, BF16 compute. The
+          result is an optimistic analytic ceiling: FLOPs over practical compute rates, operand bytes over HBM, payload bytes over NVLink, plus the
+          nominal pipeline bubble. No measured throughput is used as an input or shown as a comparison.
+        </p>
+        <nav class="jump-links" aria-label="Sections">
+          <a href="#hardware">Hardware inputs</a><a href="#calculator">Recipe calculator</a><a href="#flops">Counting FLOPs</a
+          ><a href="#bytes">Counting bytes</a><a href="#pipeline">Pipeline cost</a><a href="#muon">Muon cost</a><a href="#notes">Notes</a>
+        </nav>
+      </header>
+
+      <section id="hardware">
+        <div class="eyebrow">Practical rates, not advertised peaks</div>
+        <h2>Three roofs, and only one network</h2>
+        <p>
+          A GEMM is limited by its FLOPs or by the HBM bytes it must move. Distributed work is limited by the link that carries it. All 16 GPUs of the
+          anchor sit in one NVLink domain, so expert dispatch, the PLE lookup, FSDP and pipeline packets all share the NVLink roof; no traffic reaches
+          the scale-out network.
+        </p>
+        <div class="table-scroll card">
+          <table>
+            <thead>
+              <tr>
+                <th>Resource</th>
+                <th>GB300 input</th>
+                <th>How to read it</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>BF16 Tensor Cores</td>
+                <td>1,800 TFLOP/s / GPU</td>
+                <td>Practical sustained target shared with the Kimi K3 roofline study, not the advertised peak. Every GEMM here is BF16.</td>
+              </tr>
+              <tr>
+                <td>HBM</td>
+                <td>8 TB/s / GPU</td>
+                <td>The operand-bandwidth roof. Capacity is a separate question, answered by study 02.</td>
+              </tr>
+              <tr>
+                <td>NVLink</td>
+                <td>900 GB/s / GPU, one direction</td>
+                <td>Collectives and contention can lower effective service; opposite-direction traffic is not added to the denominator.</td>
+              </tr>
+              <tr>
+                <td>Nominal dense BF16 peak</td>
+                <td>2,500 TFLOP/s / GPU</td>
+                <td>Only the denominator of the conventional MFU metric. It never enters a time.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="result-grid">
+          <div class="card">
+            <span class="eyebrow">One GEMM</span><strong class="roof-equation">t &ge; max(F / P, B / &beta;<sub>HBM</sub>)</strong>
+            <p>F = multiply-add FLOPs; B = operand bytes; intensity I = F / B.</p>
+          </div>
+          <div class="card">
+            <span class="eyebrow">The BF16 ridge</span><strong class="roof-equation">I* = P / &beta;<sub>HBM</sub> = 225 FLOP/B</strong>
+            <p>Below the ridge, fewer bytes help. Above it, the compute rate is the limit.</p>
+          </div>
+        </div>
+        <pre class="formula">
+For every GEMM phase: forward, input gradient (DGRAD), weight gradient (WGRAD), and recompute replay
+  t_op       = max(F_op / BF16_rate, operand_bytes / HBM_bandwidth)
+T_stage      = microbatches * sum(t_op over local chunks) + attention_core_FLOPs / BF16_rate
+T_resource   = max over PP ranks of max(T_stage, NVLink_bytes / NVLink_bandwidth)
+T_step       = T_resource + (PP - 1) / (M * VPP) * max(T_stage)
+rho          = global_tokens_per_update / (GPUs * T_step)
+model TFLOP/s/GPU = rho * conventional_FLOPs_per_token / 1e12</pre
+        >
+      </section>
+
+      <section id="calculator">
+        <div class="eyebrow">Change a shape, watch a roof move</div>
+        <h2>Configure a recipe and calculate its roofline</h2>
+        <p>
+          Start from the anchor and change the layout, batch, recompute policy or hardware rates. Every result updates from those inputs. Memory
+          feasibility is not checked here; use the <a href="./qwen3-8-flash-next-memory.html#lab">memory lab</a> for the same layout.
+        </p>
+        <form id="roof-controls" class="card controls" onsubmit="return false">
+          <label
+            >GPUs<select id="roof-world">
+              <option selected>16</option>
+              <option>32</option>
+              <option>64</option>
+            </select></label
+          >
+          <label
+            >Pipeline ranks<select id="roof-pp">
+              <option>1</option>
+              <option selected>2</option>
+              <option>4</option>
+            </select></label
+          >
+          <label
+            >Virtual stages per rank<select id="roof-vp">
+              <option>1</option>
+              <option selected>2</option>
+              <option>3</option>
+              <option>4</option>
+            </select></label
+          >
+          <label
+            >Expert parallel degree<select id="roof-ep">
+              <option>1</option>
+              <option>2</option>
+              <option>4</option>
+              <option selected>8</option>
+              <option>16</option>
+              <option>32</option>
+              <option>64</option>
+            </select></label
+          >
+          <label
+            >Tokens per microbatch per DP rank<select id="roof-tokens">
+              <option>4096</option>
+              <option>8192</option>
+              <option selected>16384</option>
+              <option>32768</option>
+            </select></label
+          >
+          <label
+            >Microbatches / schedule<select id="roof-mbs">
+              <option>4</option>
+              <option>8</option>
+              <option selected>16</option>
+              <option>32</option>
+              <option>64</option>
+            </select></label
+          >
+          <label
+            >Layer recompute<select id="roof-ac">
+              <option value="full" selected>Full layer recompute</option>
+              <option value="none">No layer recompute</option>
+            </select></label
+          >
+          <label
+            >Dist-MoE slot factor<select id="roof-slot">
+              <option value="0">0</option>
+              <option value="0.25">0.25</option>
+              <option value="0.5" selected>0.5</option>
+              <option value="1">1.0</option>
+            </select></label
+          >
+          <label>BF16 rate, TFLOP/s<input id="roof-gemm" type="number" min="1" step="50" value="1800" /></label>
+          <label>HBM, TB/s<input id="roof-hbm" type="number" min="0.1" step="0.5" value="8" /></label>
+          <label>NVLink, one-way GB/s<input id="roof-nvl" type="number" min="1" step="50" value="900" /></label>
+        </form>
+        <div class="lab-actions">
+          <button type="button" id="roof-reset">Reset to the anchor recipe</button
+          ><button type="button" id="roof-share">Copy this analysis link</button><span id="roof-share-status" role="status"></span>
+        </div>
+        <p id="roof-warning" class="warning" role="status" hidden></p>
+        <div class="result-grid roof-results">
+          <article class="card">
+            <span class="eyebrow">Recipe roofline</span><strong class="big-number" id="roof-tps"></strong>
+            <p>tokens/s/GPU, including the nominal bubble</p>
+          </article>
+          <article class="card">
+            <span class="eyebrow">Model throughput at the ceiling</span><strong class="big-number" id="roof-tflops"></strong>
+            <p id="roof-mfu"></p>
+          </article>
+          <article class="card">
+            <span class="eyebrow">Step time</span><strong class="big-number" id="roof-step"></strong>
+            <p id="roof-limiter"></p>
+          </article>
+        </div>
+        <div class="table-scroll card">
+          <table id="roof-stage-table">
+            <thead>
+              <tr>
+                <th>PP rank</th>
+                <th>Layers</th>
+                <th>GEMM time</th>
+                <th>Attention cores</th>
+                <th>Compute / HBM</th>
+                <th>NVLink service</th>
+                <th>Limiter</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <figure class="roof-figure card">
+          <div class="chart-title"><strong>Forward GEMMs on the BF16 roofline</strong><span id="roof-chart-caption"></span></div>
+          <svg
+            id="roof-chart"
+            viewBox="0 0 900 420"
+            role="img"
+            aria-label="Arithmetic intensity versus attainable throughput for each forward GEMM"
+          ></svg>
+          <figcaption class="note">
+            Points are modeled roof positions for one microbatch, not measured kernels. Forward bytes are <code>2(MK + KN + MN)</code> with one
+            operand pass and no cross-GEMM reuse. Routed experts use the balanced rows per local expert, <code>EP &times; T &times; 10 / 512</code>.
+          </figcaption>
+        </figure>
+        <div class="table-scroll card">
+          <table id="roof-gemm-table">
+            <thead>
+              <tr>
+                <th>GEMM (one layer, forward)</th>
+                <th>[M, K] x [K, N]</th>
+                <th>Groups</th>
+                <th>Intensity</th>
+                <th>Bound</th>
+                <th>Time per microbatch, all phases</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="flops">
+        <div class="eyebrow">Take 6ND apart</div>
+        <h2>Stored parameters are not activated FLOPs</h2>
+        <p>
+          For <code>Y = XW</code> with <code>X [M, K]</code> and <code>W [K, N]</code>, forward costs <code>2MNK</code> FLOPs and backward adds
+          <code>dX = dY W<sup>T</sup></code> and <code>dW = X<sup>T</sup> dY</code> of the same size: <code>6MNK</code>, or
+          <code>6 N<sub>active</sub></code> FLOPs per token. Of 176.94B trainable parameters, only 6.67B are activated per token.
+        </p>
+        <div class="table-scroll card">
+          <table id="active-table">
+            <thead>
+              <tr>
+                <th>Parameter group</th>
+                <th>Stored</th>
+                <th>Activated / token</th>
+                <th>Why</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Routed experts</td>
+                <td>120,795,955,200</td>
+                <td>2,359,296,000</td>
+                <td>10 of 512 experts per layer: <code>48 &times; 10 &times; 3 &times; 2560 &times; 640</code></td>
+              </tr>
+              <tr>
+                <td>PLE table</td>
+                <td>51,200,245,760</td>
+                <td>0</td>
+                <td>A lookup: 16 rows are read, none multiplied. Its key and value projections are counted below.</td>
+              </tr>
+              <tr>
+                <td>Input embedding</td>
+                <td>635,699,200</td>
+                <td>0</td>
+                <td>A lookup, as in TorchTitan's convention.</td>
+              </tr>
+              <tr>
+                <td>Everything else: GDN, QSA, indexers, shared experts, routers, residual mixers, PLE projections, LM head</td>
+                <td>4,311,999,360</td>
+                <td>4,311,999,360</td>
+                <td>Dense: every token uses every weight.</td>
+              </tr>
+              <tr>
+                <td><strong>Total</strong></td>
+                <td><strong>176,943,899,520</strong></td>
+                <td><strong>6,671,295,360</strong></td>
+                <td>6 &times; 6.67B = 40.03 GFLOP per token before attention.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <aside class="callout">
+          <strong>The table and the experts are opposite trades.</strong> The experts are 68% of the parameters and 35% of the activated weights. The
+          table is 29% of the parameters and 0% of the FLOPs: it buys capacity with optimizer state (study 02) and network bytes, never with Tensor
+          Core time.
+        </aside>
+        <h3>Attention adds work without adding a weight matrix</h3>
+        <div class="table-scroll card">
+          <table id="core-table">
+            <thead>
+              <tr>
+                <th>Core, per token per layer</th>
+                <th>Conventional (TorchTitan)</th>
+                <th>Issued-work sketch</th>
+                <th>What changes</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <p id="qsa-note"></p>
+        <div class="table-scroll card">
+          <table id="token-flops">
+            <thead>
+              <tr>
+                <th>Per token</th>
+                <th>GFLOP</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <aside class="callout">
+          <strong>Model FLOPs, issued work and MFU are different quantities.</strong> TorchTitan's TFLOPS and MFU use the conventional column:
+          <code>6 &times; active parameters</code> plus <code>6 &times; 24 &times; 512 &times; min(S, 2051)</code> per QSA layer, the indexer term,
+          and <code>18 &times; 48 &times; 128 &times; 128</code> per GDN layer. Recompute, the KL teacher and the attention backward's QK replay are
+          real work but never raise MFU. More recompute can make a job look compute-bound while making it slower.
+        </aside>
+      </section>
+
+      <section id="bytes">
+        <div class="eyebrow">Follow each byte to its destination</div>
+        <h2>The router moves more bytes than everything else together</h2>
+        <p>
+          Flash-Next dispatches the full 2,560-wide token, ten times, to experts on up to seven other GPUs. With uniform routing, a fraction
+          <code>1 &minus; 1/EP</code> of the copies leaves the GPU. Each MoE layer sends them out (dispatch), back (combine), and reverses both in
+          backward. Under full recompute, Dist-MoE re-dispatches the rows its slot did not keep.
+        </p>
+        <pre class="formula">
+Expert payload / layer / microbatch = exchanges * T * 10 * (1 - 1/EP) * 2560 * 2 bytes
+exchanges = 4 (dispatch, combine, and their reverses) + (1 - slot factor) under full recompute
+          = 4.5 in the anchor: 16384 * 10 * 7/8 * 5120 * 4.5 = 3.08 GiB per layer per microbatch</pre
+        >
+        <div class="table-scroll card">
+          <table id="traffic-table">
+            <thead>
+              <tr>
+                <th>Traffic per GPU per update</th>
+                <th>PP rank 0</th>
+                <th>PP rank 1</th>
+                <th>How it is counted</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <div class="parallel-grid">
+          <article class="card">
+            <span class="eyebrow">PLE</span>
+            <h3>IDs out, rows back</h3>
+            <p>
+              Each token asks for 16 rows. Without deduplication, 7/8 of them live on another owner: an 8-byte ID out, a 320-byte BF16 row back, and a
+              320-byte row gradient in backward. That is under 1% of the expert payload, and the 95-GiB table itself never crosses a link.
+            </p>
+          </article>
+          <article class="card">
+            <span class="eyebrow">FSDP under PP</span>
+            <h3>One gather, one reduction</h3>
+            <p>
+              PP keeps every local chunk gathered and defers gradient reduction to the end of the schedule, so dense weights cost one BF16 all-gather
+              and one FP32 reduce-scatter per update: <code>6P(1 &minus; 1/8)</code> bytes. Experts have expert FSDP 1 and no collective at all.
+              Without PP, each microbatch gathers twice and reduces once.
+            </p>
+          </article>
+          <article class="card">
+            <span class="eyebrow">PP packets</span>
+            <h3>The whole four-stream state</h3>
+            <p>
+              A stage boundary carries <code>[16384, 4 &times; 2560]</code> BF16, 320 MiB per microbatch forward and the same gradient backward. VPP2
+              puts three boundaries in every microbatch's path; each rank touches all three.
+            </p>
+          </article>
+        </div>
+        <aside class="callout">
+          <strong>A budget, not a protocol trace.</strong> Payloads assume balanced routing, one copy per remote assignment and no metadata, alignment
+          or routing-weight bytes. A dispatcher that sends a token once per destination rank and sums there would move fewer bytes. Competing
+          collectives share one NVLink roof; overlap does not give each its own bandwidth.
+        </aside>
+      </section>
+
+      <section id="pipeline">
+        <div class="eyebrow">The useful FLOPs still need a schedule</div>
+        <h2>The LM head makes the last stage the slow one</h2>
+        <p id="pipeline-text"></p>
+        <div class="card">
+          <div class="chart-title"><strong>Compute per PP rank, one update</strong><span id="pipeline-caption"></span></div>
+          <div id="pipeline-bars" class="cost-bars"></div>
+        </div>
+        <pre class="formula">
+Nominal bubble overhead = (PP - 1) / (M * VPP)
+Anchor: (2 - 1) / (16 * 2) = 3.13% of the slowest rank's compute
+VPP1:   (2 - 1) / 16       = 6.25%</pre
+        >
+        <p>
+          The bubble formula assumes balanced chunks. With the LM head and the final mixer on chunk 3, rank 1 has more work than rank 0 even though
+          both own 24 decoder layers, and the faster rank waits. Moving the head's work, or giving rank 1 fewer decoder layers, would balance compute
+          but shift memory: rank 0 already carries the table (study 02). Balancing one resource unbalances the other.
+        </p>
+      </section>
+
+      <section id="muon">
+        <div class="eyebrow">Once per update, not once per microbatch</div>
+        <h2>Muon is a matrix workload of its own</h2>
+        <p>
+          DistMuon orthogonalizes each logical matrix with 8 Polar Express iterations on a BF16 working copy. For an expert matrix oriented as
+          <code>X [r, c]</code> with <code>r = 640</code> and <code>c = 2560</code>, an iteration forms <code>A = XX<sup>T</sup></code
+          >, a polynomial in <code>A</code>, and the update <code>BX</code>: <code>4r<sup>2</sup>c + 2r<sup>3</sup></code> FLOPs.
+        </p>
+        <pre class="formula" id="muon-formula"></pre>
+        <p>
+          The routed experts dominate: each GPU owns 24 layers &times; 64 experts &times; 3 matrices. The dense Muon matrices add little, and the
+          narrow 640 side keeps every Gram matrix small. Muon is a small fraction of the ideal step, and more tokens per update amortize it further.
+          The redistribution between storage and compute layouts is communication not priced here.
+        </p>
+      </section>
+
+      <section id="notes" class="sources">
+        <h2>Sources and accounting notes</h2>
+        <ul>
+          <li>
+            <a href="https://huggingface.co/Qwen/Qwen3.8-Flash-Next">Qwen3.8-Flash-Next</a> configuration and the shape audit in
+            <a href="./qwen3-8-flash-next.html">study 01</a>; the lifetimes and ownership in <a href="./qwen3-8-flash-next-memory.html">study 02</a>.
+          </li>
+          <li>
+            TorchTitan's Flash-Next model, recipe and FLOP convention (<code>torchtitan/models/common/flops.py</code> and the QSA attention config):
+            the conventional column and its MFU denominator.
+          </li>
+          <li>Practical GB300 rates as used in the <a href="./kimi-k3-roofline.html">Kimi K3 roofline study</a>.</li>
+          <li>
+            <a href="https://people.eecs.berkeley.edu/~kubitron/cs252/handouts/papers/RooflineVyNoYellow.pdf"
+              >Williams, Waterman and Patterson, Roofline</a
+            >: the compute and bandwidth ceilings.
+          </li>
+        </ul>
+        <p>
+          The ceiling omits non-matmul work (norms, gates, convolutions, top-k, softmax), launch and CPU overhead, grouped-GEMM inefficiency, routing
+          imbalance, collective protocol overhead, the optimizer step and its communication, and any dependency between compute and communication. GDN
+          cores use TorchTitan's state-contraction formula; intra-chunk terms are not priced. Routed experts assume balanced routing without token
+          dropping. Every number is computed from the stated inputs; none is measured.
+        </p>
+        <nav class="series-footer" aria-label="Related studies">
+          <a href="./qwen3-8-flash-next-memory.html">&#8592; Previous: Study 02 &mdash; Memory</a>
+          <a href="./qwen3-8-flash-next.html">Back to Study 01 &mdash; Architecture</a>
+        </nav>
+      </section>
+    </main>
+  </body>
+</html>
