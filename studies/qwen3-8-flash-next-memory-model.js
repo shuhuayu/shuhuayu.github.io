@@ -163,11 +163,15 @@
     const viewsChunk = Math.max(0, ...owned.map((chunk) => 2 * (chunk.dense + chunk.routed / c.ep)));
     // Resharding after forward and backward: the running layer plus one prefetched
     // layer (or the embedding / head unit, whichever is larger).
-    const unitViews = owned.flatMap((chunk) => [
-      ...chunk.layers.map((layer) => 2 * A.sum(A.layerGroups(layer), (g) => (g.role === "routed" ? g.params / c.ep : g.role === "dense" ? g.params : 0))),
-      ...(chunk.first ? [2 * A.sum(A.frontGroups, (g) => g.params)] : []),
-      ...(chunk.last ? [2 * A.sum(A.backGroups, (g) => g.params)] : []),
-    ]).sort((a, b) => b - a);
+    const unitViews = owned
+      .flatMap((chunk) => [
+        ...chunk.layers.map(
+          (layer) => 2 * A.sum(A.layerGroups(layer), (g) => (g.role === "routed" ? g.params / c.ep : g.role === "dense" ? g.params : 0))
+        ),
+        ...(chunk.first ? [2 * A.sum(A.frontGroups, (g) => g.params)] : []),
+        ...(chunk.last ? [2 * A.sum(A.backGroups, (g) => g.params)] : []),
+      ])
+      .sort((a, b) => b - a);
     const viewsLayer = (unitViews[0] || 0) + (unitViews[1] || 0);
     return {
       rank,
