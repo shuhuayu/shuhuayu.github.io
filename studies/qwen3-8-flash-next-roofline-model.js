@@ -274,6 +274,9 @@
     const bubble = c.pp === 1 ? 0 : (c.pp - 1) / (c.mbs * c.vp);
     const stepSeconds = resourceSeconds + bubble * computeSeconds;
     const tokensPerSecondPerGPU = globalTokens / (c.world * stepSeconds);
+    // Bound with no overlap at all: every NVLink byte waits on (and delays) compute.
+    const exposedStepSeconds = Math.max(...stages.map((stage) => stage.computeSeconds + stage.nvlSeconds)) + bubble * computeSeconds;
+    const exposedTokensPerSecondPerGPU = globalTokens / (c.world * exposedStepSeconds);
     return {
       config: c,
       dp,
@@ -290,6 +293,9 @@
       tokensPerSecondPerGPU,
       modelTflopsPerGPU: (tokensPerSecondPerGPU * perToken.conventional) / 1e12,
       mfu: (tokensPerSecondPerGPU * perToken.conventional) / (nominalPeak * 1e12),
+      exposedStepSeconds,
+      exposedTokensPerSecondPerGPU,
+      exposedModelTflopsPerGPU: (exposedTokensPerSecondPerGPU * perToken.conventional) / 1e12,
       expertRows: (c.ep * T * topK) / E,
     };
   }

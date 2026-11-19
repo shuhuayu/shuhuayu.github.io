@@ -48,6 +48,11 @@ test("the anchor roofline matches the page's static numbers", () => {
 test("the anchor is compute-bound and the head makes the last rank slowest", () => {
   const r = R.calculate();
   for (const stage of r.stages) assert.ok(stage.computeSeconds > stage.nvlSeconds);
+  // No overlap at all: the page's lower bracket.
+  assert.equal(r.exposedStepSeconds.toFixed(2), "5.75");
+  assert.equal(Math.round(r.exposedModelTflopsPerGPU), 967);
+  const html = readFileSync(join(__dirname, "../qwen3-8-flash-next-roofline.html"), "utf8");
+  for (const text of ["5.75 s", "967", "35%", "1.44 s", "4.17 s"]) assert.ok(html.includes(text), text);
   assert.ok(r.stages[1].computeSeconds > r.stages[0].computeSeconds);
   const ep = r.stages[0].traffic.find((item) => item.key === "ep").bytes;
   assert.equal(ep, 16 * 24 * 4.5 * 16384 * 10 * (7 / 8) * 2560 * 2);

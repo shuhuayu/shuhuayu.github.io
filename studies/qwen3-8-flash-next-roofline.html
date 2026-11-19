@@ -45,7 +45,8 @@
           Anchor recipe, as in study 02: 16 GB300s in one NVLink domain, PP2 with interleaved 1F1B and two virtual stages, DP-shard8 / EP8, 16
           microbatches of 16,384 packed tokens per DP rank in 4K documents, full layer recompute, Dist-MoE with slot factor 0.5, BF16 compute. The
           result is an optimistic analytic ceiling: FLOPs over practical compute rates, operand bytes over HBM, payload bytes over NVLink, plus the
-          nominal pipeline bubble. No measured throughput is used as an input or shown as a comparison.
+          nominal pipeline bubble. Communication is priced byte by byte but assumed to overlap perfectly with compute, so it sets the step only if it
+          exceeds compute. No measured throughput is used as an input or shown as a comparison.
         </p>
         <nav class="jump-links" aria-label="Sections">
           <a href="#hardware">Hardware inputs</a><a href="#calculator">Recipe calculator</a><a href="#flops">Counting FLOPs</a
@@ -108,8 +109,10 @@
 For every GEMM phase: forward, input gradient (DGRAD), weight gradient (WGRAD), and recompute replay
   t_op       = max(F_op / BF16_rate, operand_bytes / HBM_bandwidth)
 T_stage      = microbatches * sum(t_op over local chunks) + attention_core_FLOPs / BF16_rate
-T_resource   = max over PP ranks of max(T_stage, NVLink_bytes / NVLink_bandwidth)
+T_nvl        = NVLink_bytes / NVLink_bandwidth
+T_resource   = max over PP ranks of max(T_stage, T_nvl)        (assumes perfect overlap)
 T_step       = T_resource + (PP - 1) / (M * VPP) * max(T_stage)
+T_exposed    = max over PP ranks of (T_stage + T_nvl) + bubble  (no overlap at all)
 rho          = global_tokens_per_update / (GPUs * T_step)
 model TFLOP/s/GPU = rho * conventional_FLOPs_per_token / 1e12</pre
         >
@@ -405,6 +408,13 @@ exchanges = 4 (dispatch, combine, and their reverses) + (1 - slot factor) under 
           or routing-weight bytes. A dispatcher that sends a token once per destination rank and sums there would move fewer bytes. Competing
           collectives share one NVLink roof; overlap does not give each its own bandwidth.
         </aside>
+        <aside class="callout">
+          <strong>Comms are priced, then assumed hidden.</strong> Assuming perfect overlap, the step is compute plus the bubble: NVLink service is
+          1.44 s per update on the pace-setting rank against 4.17 s of compute, 35% of it (40% on rank 0). That margin is what makes the assumption
+          plausible, not a guarantee. Inside a MoE layer, dispatch, the expert GEMMs and combine form a dependency chain; only Dist-MoE's chunking and
+          the other virtual stage's work can cover it. If nothing overlapped, the same bytes would stretch the step to 5.75 s and the ceiling to 967
+          model TFLOP/s/GPU, so the anchor's ceiling lies between 967 and 1,291 depending on how much of the expert traffic is hidden.
+        </aside>
       </section>
 
       <section id="pipeline">
@@ -463,9 +473,9 @@ VPP1:   (2 - 1) / 16       = 6.25%</pre
         </ul>
         <p>
           The ceiling omits non-matmul work (norms, gates, convolutions, top-k, softmax), launch and CPU overhead, grouped-GEMM inefficiency, routing
-          imbalance, collective protocol overhead, the optimizer step and its communication, and any dependency between compute and communication. GDN
-          cores use TorchTitan's state-contraction formula; intra-chunk terms are not priced. Routed experts assume balanced routing without token
-          dropping. Every number is computed from the stated inputs; none is measured.
+          imbalance, collective protocol overhead, and the optimizer step and its communication. It assumes communication overlaps compute perfectly;
+          the no-overlap bound is reported alongside. GDN cores use TorchTitan's state-contraction formula; intra-chunk terms are not priced. Routed
+          experts assume balanced routing without token dropping. Every number is computed from the stated inputs; none is measured.
         </p>
         <nav class="series-footer" aria-label="Related studies">
           <a href="./qwen3-8-flash-next-memory.html">&#8592; Previous: Study 02 &mdash; Memory</a>

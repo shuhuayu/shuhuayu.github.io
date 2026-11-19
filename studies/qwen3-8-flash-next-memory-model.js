@@ -47,7 +47,7 @@
     for (const key of ["slot", "scratch", "reserve"]) if (!Number.isFinite(c[key]) || c[key] < 0) throw new RangeError(`${key} must be nonnegative`);
     if (c.scratch <= 0) throw new RangeError("Scratch capacity factor must be positive");
     if (!["forward", "backward", "optimizer"].includes(c.phase)) throw new RangeError("Unknown lifecycle phase");
-    if (!["stage", "chunk"].includes(c.views)) throw new RangeError("Unknown BF16 view residency");
+    if (!["stage", "chunk", "layer"].includes(c.views)) throw new RangeError("Unknown BF16 view residency");
     if (!["deferred", "reduced"].includes(c.grad)) throw new RangeError("Unknown gradient lifecycle");
     if (!["stage", "world"].includes(c.table)) throw new RangeError("Unknown PLE table placement");
     return c;
@@ -161,6 +161,14 @@
     const deferredGrad = (dense + routedLocal + table) * 4;
     const viewsStage = sum(owned, (chunk) => 2 * (chunk.dense + chunk.routed / c.ep));
     const viewsChunk = Math.max(0, ...owned.map((chunk) => 2 * (chunk.dense + chunk.routed / c.ep)));
+    // Resharding after forward and backward: the running layer plus one prefetched
+    // layer (or the embedding / head unit, whichever is larger).
+    const unitViews = owned.flatMap((chunk) => [
+      ...chunk.layers.map((layer) => 2 * A.sum(A.layerGroups(layer), (g) => (g.role === "routed" ? g.params / c.ep : g.role === "dense" ? g.params : 0))),
+      ...(chunk.first ? [2 * A.sum(A.frontGroups, (g) => g.params)] : []),
+      ...(chunk.last ? [2 * A.sum(A.backGroups, (g) => g.params)] : []),
+    ]).sort((a, b) => b - a);
+    const viewsLayer = (unitViews[0] || 0) + (unitViews[1] || 0);
     return {
       rank,
       owned,
@@ -179,6 +187,7 @@
       deferredGrad,
       viewsStage,
       viewsChunk,
+      viewsLayer,
       stateTotal: master + momentum + moments + reducedGrad,
     };
   }
@@ -244,7 +253,7 @@
     const stage = stages[c.stage];
     const active = c.phase !== "optimizer";
     const gradient = c.phase === "forward" ? 0 : c.phase === "backward" && c.grad === "deferred" ? stage.deferredGrad : stage.reducedGrad;
-    const views = !active ? 0 : c.views === "stage" ? stage.viewsStage : stage.viewsChunk;
+    const views = !active ? 0 : { stage: stage.viewsStage, chunk: stage.viewsChunk, layer: stage.viewsLayer }[c.views];
     // One layer's recompute is live at a time; take the largest named working set.
     const layerWorking = Math.max(w.gdnChunkStates + w.gdnProjection, w.selected + w.teacherKeys + w.teacherLogits);
     const parts = [
@@ -279,7 +288,9 @@
         detail:
           c.views === "stage"
             ? "PP keeps every local chunk unsharded from its first forward to the schedule end. The PLE table has no view."
-            : "Only the largest local chunk at a time: an optimistic residency alternative.",
+            : c.views === "layer"
+              ? "Reshard after forward and backward: the running layer plus one prefetched layer."
+              : "Only the largest local chunk at a time: an optimistic residency alternative.",
       },
       {
         key: "activation",

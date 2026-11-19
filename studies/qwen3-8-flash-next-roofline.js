@@ -61,7 +61,12 @@
     const limiter = slowest.computeSeconds >= slowest.nvlSeconds ? "compute / HBM" : "NVLink";
     $("roof-limiter").textContent = `${count(r.globalTokens)} tokens per update. PP rank ${
       slowest.rank
-    } sets the pace (${limiter}); the nominal bubble adds ${seconds(r.bubble * r.computeSeconds)}.`;
+    } sets the pace (${limiter}); the nominal bubble adds ${seconds(r.bubble * r.computeSeconds)}. Its NVLink service is ${(
+      (100 * slowest.nvlSeconds) /
+      slowest.computeSeconds
+    ).toFixed(0)}% of its compute, assumed fully hidden; with no overlap the step is ${seconds(r.exposedStepSeconds)} and ${count(
+      r.exposedModelTflopsPerGPU
+    )} model TFLOP/s/GPU.`;
     $("roof-stage-table").tBodies[0].innerHTML = r.stages
       .map((stage) => {
         const range = stage.owned
